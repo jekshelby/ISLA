@@ -1,0 +1,82 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+publish/
+artifacts/
+release/
+releases/
+
+# Generated installer payloads and package files
+installer/ISLA-payload.zip
+installer/*.zip
+installer/*.msix
+installer/*.appx
+installer/*.cer
+installer/*.pfx
+installer/*.p12
+installer/*.pem
+
+# Local Visual Studio / VS Code state
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.idea/
+
+# Local project settings
+*.DotSettings.user
+*.sln.iml
+
+# .NET and NuGet local files
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+packages/
+*.nuget.g.props
+*.nuget.g.targets
+*.nuget.dgspec.json
+*.assets.cache
+*.AssemblyAttributes.cs
+*.FileListAbsolute.txt
+*.Up2Date
+*.genruntimeconfig.cache
+*.genpublishdeps.cache
+*.genbundle.cache
+*.MarkupCompile.cache
+*.CoreCompileInputs.cache
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+[Tt]emp/
+tmp/
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+
+# Local secrets and certificates
+*.key
+*.pfx
+*.p12
+*.snk
+
+# Generated signing and packaging files
+artifacts/
+*.appinstaller
+*.blockmap
+AppxManifest.xml
+*.p7x
+
+# Additional OS/editor metadata
+.DS_Store
+*.bak
+*.orig

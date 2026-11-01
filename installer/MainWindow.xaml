@@ -1,0 +1,46 @@
+<Window x:Class="ISLAInstaller.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ISLA Setup" Width="600" Height="400"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="#101114" FontFamily="Segoe UI" Foreground="#F5F5F7">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="18,9" />
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="Background" Value="#272A31" />
+            <Setter Property="Foreground" Value="#F5F5F7" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+    </Window.Resources>
+    <Grid Margin="30">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid>
+            <Border Width="44" Height="44" CornerRadius="14" Background="#72D6A1" HorizontalAlignment="Left">
+                <TextBlock Text="I" Foreground="#101114" FontSize="24" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <StackPanel Margin="60,0,0,0">
+                <TextBlock Text="ISLA" FontSize="13" Foreground="#72D6A1" FontWeight="SemiBold" />
+                <TextBlock x:Name="TitleText" FontSize="26" FontWeight="SemiBold" Text="Install ISLA" />
+            </StackPanel>
+        </Grid>
+        <Border Grid.Row="1" Margin="0,24,0,18" Padding="22" Background="#191B20" CornerRadius="16">
+            <StackPanel>
+                <TextBlock x:Name="DescriptionText" FontSize="15" Foreground="#D6D8DE" TextWrapping="Wrap"
+                           Text="ISLA is a Dynamic Island companion for Windows. It will be installed with a Start Menu shortcut and an uninstaller."/>
+                <TextBlock x:Name="StatusText" Margin="0,25,0,0" Foreground="#9DA2AE" TextWrapping="Wrap"/>
+                <ProgressBar x:Name="InstallProgress" Margin="0,20,0,0" Height="7" Visibility="Collapsed" IsIndeterminate="True" Foreground="#72D6A1"/>
+            </StackPanel>
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BackButton" Content="Back" IsEnabled="False" Click="BackButton_Click"/>
+            <Button x:Name="NextButton" Background="#72D6A1" Foreground="#101114" Content="Install" IsDefault="True" Click="NextButton_Click"/>
+            <Button x:Name="CancelButton" Content="Cancel" Margin="0" Click="CancelButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>
