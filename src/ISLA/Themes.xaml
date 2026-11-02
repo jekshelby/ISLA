@@ -21,7 +21,7 @@
     <SolidColorBrush x:Key="IslandHoverOverlayStrong" Color="#26FFFFFF" po:Freeze="True" />
 
     <!-- ===== Typography ===== -->
-    <FontFamily x:Key="UiFont">Segoe UI</FontFamily>
+    <FontFamily x:Key="UiFont">Segoe UI Variable Text, Segoe UI</FontFamily>
 
     <!-- Brand / header -->
     <Style x:Key="BrandStyle" TargetType="TextBlock">
@@ -36,7 +36,17 @@
         <Setter Property="Foreground" Value="{StaticResource IslandText}" />
         <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
         <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="Bold" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+    </Style>
+
+    <!-- Battery percentage shown at the right edge of the compact island -->
+    <Style x:Key="CompactPercentStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource IslandTextSecondary}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="12" />
         <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
     </Style>
 
     <!-- Small section label ("Now playing", "Quick Settings", ...) -->

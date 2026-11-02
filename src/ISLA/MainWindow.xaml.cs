@@ -35,7 +35,7 @@ public partial class MainWindow : Window
     private const double CompactWidth = 180;
     private const double CompactHeight = 30;
     private const double NotificationWidth = 306;
-    private const double CompactHorizontalPadding = 18;
+    private const double CompactHorizontalPadding = 5;
     private const double NotificationHorizontalPadding = 4;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     private const double IdleNotchHeight = CompactHeight * 0.5;
@@ -142,6 +142,21 @@ public partial class MainWindow : Window
     private bool _refreshingSettings;
     private System.Windows.Media.Brush _normalBatteryBrush = System.Windows.Media.Brushes.White;
     private readonly System.Windows.Media.Brush _lowBatteryBrush = Frozen(new SolidColorBrush(Colors.IndianRed));
+
+    // Battery colour by level: <=20 red, 21-29 yellow, >=30 green.
+    private static readonly System.Windows.Media.Brush BatteryRedBrush = Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0x45, 0x3A)));
+    private static readonly System.Windows.Media.Brush BatteryYellowBrush = Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0xD6, 0x0A)));
+    private static readonly System.Windows.Media.Brush BatteryGreenBrush = Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x38, 0xD4, 0x6A)));
+
+    private static System.Windows.Media.Brush GetBatteryBrush(int percent) =>
+        percent < 0 ? BatteryGreenBrush
+        : percent <= 20 ? BatteryRedBrush
+        : percent < 30 ? BatteryYellowBrush
+        : BatteryGreenBrush;
+
+    // Track announcements + mini spectrum
+    private string? _announcedTrackKey;
+    private bool _spectrumActive;
 
     public MainWindow()
     {
@@ -370,6 +385,7 @@ public partial class MainWindow : Window
 
     private void SetCompactBatteryRing(int percent)
     {
+        CompactBatteryRing.Stroke = GetBatteryBrush(percent);
         var progress = Math.Clamp(percent, 0, 100) / 100d;
         const double center = 11;
         const double radius = 9.5;
@@ -404,6 +420,7 @@ public partial class MainWindow : Window
         // Fixed notch size: independent from the island's animated size, so never clipped.
         // The stroke is centred on a path inset by half the thickness so it stays fully
         // inside the notch bounds.
+        IdleBatteryEdge.Stroke = GetBatteryBrush(percent);
         const double inset = IdleBatteryStroke / 2;
         const double left = inset;
         const double right = IdleNotchWidth - inset;
@@ -775,6 +792,8 @@ public partial class MainWindow : Window
             UpdateMediaProgressDisplay(state);
 
             SetPlayingIcon(state.PlaybackStatus == "Playing");
+            SetSpectrumActive(state.PlaybackStatus == "Playing");
+            AnnounceTrackChange(state);
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or InvalidOperationException)
         {
@@ -783,6 +802,79 @@ public partial class MainWindow : Window
         finally
         {
             _refreshingMedia = false;
+        }
+    }
+
+    /// <summary>
+    /// Shows a "Now playing" notification when the track changes. The first track seen after
+    /// launch is recorded silently; a track that changes while paused is announced on play.
+    /// </summary>
+    private void AnnounceTrackChange(ISLA.Media.MediaState state)
+    {
+        if (string.IsNullOrWhiteSpace(state.Title))
+        {
+            return;
+        }
+
+        var key = $"{state.Title}|{state.Artist}";
+        if (_announcedTrackKey is null)
+        {
+            _announcedTrackKey = key;
+            return;
+        }
+
+        if (state.PlaybackStatus != "Playing" || string.Equals(key, _announcedTrackKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _announcedTrackKey = key;
+        var message = string.IsNullOrWhiteSpace(state.Artist) ? state.Title : $"{state.Title} — {state.Artist}";
+        ShowNodeNotification("Now playing", message, TimeSpan.FromSeconds(3.5));
+    }
+
+    /// <summary>
+    /// While media is playing, the battery percentage on the right is swapped for a small
+    /// animated spectrum. Animations only run while it is visible.
+    /// </summary>
+    private void SetSpectrumActive(bool active)
+    {
+        if (active == _spectrumActive)
+        {
+            return;
+        }
+
+        _spectrumActive = active;
+        CompactBatteryPercentText.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        CompactSpectrum.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+
+        double[] seconds = [0.46, 0.62, 0.38, 0.56, 0.50];
+        double[] lows = [0.25, 0.20, 0.30, 0.22, 0.28];
+        for (var i = 0; i < CompactSpectrum.Children.Count; i++)
+        {
+            if (CompactSpectrum.Children[i].RenderTransform is not ScaleTransform scale)
+            {
+                continue;
+            }
+
+            if (active)
+            {
+                scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation
+                {
+                    From = lows[i % lows.Length],
+                    To = 1,
+                    Duration = TimeSpan.FromSeconds(seconds[i % seconds.Length]),
+                    BeginTime = TimeSpan.FromMilliseconds(i * 70),
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever,
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+                });
+            }
+            else
+            {
+                scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                scale.ScaleY = 0.4;
+            }
         }
     }
 
@@ -1016,10 +1108,10 @@ public partial class MainWindow : Window
         CompactBatteryContent.Visibility = Visibility.Visible;
         IdleBatteryEdge.Visibility = Visibility.Collapsed;
         IdleBatteryTrack.Visibility = Visibility.Collapsed;
-        CompactContent.Width = CompactWidth - 36;
+        CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 13;
-        IslandSurface.Padding = new Thickness(18, 0, 18, 0);
+        IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
         if (!animate)
         {
             IslandSurface.BeginAnimation(WidthProperty, null);
