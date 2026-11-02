@@ -33,7 +33,10 @@ public partial class MainWindow : Window
 
     // ---- Island geometry -------------------------------------------------------------
     private const double CompactWidth = 180;
-    private const double CompactHeight = 34;
+    private const double CompactHeight = 30;
+    private const double NotificationWidth = 306;
+    private const double CompactHorizontalPadding = 18;
+    private const double NotificationHorizontalPadding = 4;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     private const double IdleNotchHeight = CompactHeight * 0.5;
     private const double NormalTopInset = 6;
@@ -42,7 +45,7 @@ public partial class MainWindow : Window
     private const double TimerHeight = 280;
     private const double SettingsHeight = MediaHeight;
     private const double ExpandedContentHeight = 280;
-    private const double CompactRadius = 17;
+    private const double CompactRadius = 15;
     private const double ExpandedRadius = 28;
 
     // Width of one dock slot: button 30 + margins 1 + 1.
@@ -116,6 +119,9 @@ public partial class MainWindow : Window
     private string? _pomodoroNotice;
     private bool? _lastCapsLock;
     private bool? _lastCharging;
+    private string? _lastWiFiStatus;
+    private string? _lastBluetoothStatus;
+    private bool _lowBatteryNotified;
     private DateTime _nodeNotificationUntil;
     private ISLA.Media.MediaState? _lastMediaState;
     private DateTime _mediaStateCapturedAtUtc;
@@ -315,16 +321,15 @@ public partial class MainWindow : Window
 
             SetText(BatteryValueText, state.BatteryPercent < 0 ? "Unknown" : $"{state.BatteryPercent}%");
             SetText(CompactBatteryPercentText, state.BatteryPercent < 0 ? "--%" : $"{state.BatteryPercent}%");
-            CompactBatteryProgress.Value = state.BatteryPercent < 0 ? 0 : state.BatteryPercent;
-            CompactBatteryProgress.Foreground = state.BatteryPercent >= 0 && state.BatteryPercent <= 20
-                ? _lowBatteryBrush
-                : _normalBatteryBrush;
+            SetCompactBatteryRing(state.BatteryPercent);
             CompactChargingIcon.Visibility = state.IsPluggedIn ? Visibility.Visible : Visibility.Collapsed;
             if (_lastCharging is bool previousCharging && previousCharging != state.IsPluggedIn)
             {
                 ShowNodeNotification(state.IsPluggedIn ? "Charging" : "Not charging");
             }
             _lastCharging = state.IsPluggedIn;
+            NotifyWirelessChanges(state);
+            NotifyLowBattery(state);
             SetText(PowerStatusText, state.IsPluggedIn ? "Plugged in" : "On battery");
             SetText(WiFiStatusText, state.WiFiStatus);
             SetText(BluetoothStatusText, state.BluetoothStatus);
@@ -347,6 +352,85 @@ public partial class MainWindow : Window
         finally
         {
             _refreshingSettings = false;
+        }
+    }
+
+    private void SetCompactBatteryRing(int percent)
+    {
+        var progress = Math.Clamp(percent, 0, 100) / 100d;
+        const double center = 11;
+        const double radius = 9.5;
+        if (progress <= 0)
+        {
+            CompactBatteryRing.Data = null;
+            return;
+        }
+
+        if (progress >= 0.999)
+        {
+            CompactBatteryRing.Data = new EllipseGeometry(new System.Windows.Point(center, center), radius, radius);
+            return;
+        }
+
+        var angle = progress * Math.PI * 2 - Math.PI / 2;
+        var end = new System.Windows.Point(center + radius * Math.Cos(angle), center + radius * Math.Sin(angle));
+        var figure = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(center, center - radius),
+            Segments =
+            [
+                new ArcSegment(end, new System.Windows.Size(radius, radius), 0, progress > 0.5,
+                    SweepDirection.Clockwise, true)
+            ]
+        };
+        CompactBatteryRing.Data = new PathGeometry([figure]);
+    }
+
+    private void NotifyWirelessChanges(QuickSettingsState state)
+    {
+        if (_lastWiFiStatus is not null && !string.Equals(_lastWiFiStatus, state.WiFiStatus, StringComparison.Ordinal))
+        {
+            if (state.WiFiStatus.StartsWith("On — ", StringComparison.Ordinal))
+            {
+                ShowNodeNotification($"Wi-Fi connected to {state.WiFiStatus[5..]}");
+            }
+            else if (state.WiFiStatus == "On")
+            {
+                ShowNodeNotification("Wi-Fi on");
+            }
+            else if (state.WiFiStatus == "Off")
+            {
+                ShowNodeNotification("Wi-Fi off");
+            }
+        }
+        _lastWiFiStatus = state.WiFiStatus;
+
+        if (_lastBluetoothStatus is not null && !string.Equals(_lastBluetoothStatus, state.BluetoothStatus, StringComparison.Ordinal))
+        {
+            if (state.BluetoothStatus == "On")
+            {
+                ShowNodeNotification("Bluetooth on");
+            }
+            else if (state.BluetoothStatus == "Off")
+            {
+                ShowNodeNotification("Bluetooth off");
+            }
+        }
+        _lastBluetoothStatus = state.BluetoothStatus;
+    }
+
+    private void NotifyLowBattery(QuickSettingsState state)
+    {
+        if (state.IsPluggedIn || state.BatteryPercent < 0 || state.BatteryPercent > 20)
+        {
+            _lowBatteryNotified = false;
+            return;
+        }
+
+        if (!_lowBatteryNotified)
+        {
+            _lowBatteryNotified = true;
+            ShowNodeNotification("Battery low", $"{state.BatteryPercent}% remaining", TimeSpan.FromSeconds(4));
         }
     }
 
@@ -448,6 +532,8 @@ public partial class MainWindow : Window
         _lastInteractionUtc = DateTime.UtcNow;
         NodeNotificationAppText.Text = appName;
         NodeNotificationText.Text = message;
+        IslandSurface.Padding = new Thickness(NotificationHorizontalPadding, 0, NotificationHorizontalPadding, 0);
+        CompactContent.Width = NotificationWidth - (NotificationHorizontalPadding * 2);
         CompactContent.Visibility = Visibility.Visible;
         NodeNotificationContent.Visibility = Visibility.Visible;
         NodeNotificationContent.Opacity = 0;
@@ -459,12 +545,12 @@ public partial class MainWindow : Window
         var animation = new DoubleAnimation
         {
             From = IslandSurface.Width,
-            To = Math.Max(IslandSurface.Width, CompactWidth * 1.4),
+            To = Math.Max(IslandSurface.Width, NotificationWidth),
             Duration = TimeSpan.FromMilliseconds(180),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
             FillBehavior = FillBehavior.Stop
         };
-        animation.Completed += (_, _) => IslandSurface.Width = CompactWidth * 1.4;
+        animation.Completed += (_, _) => IslandSurface.Width = NotificationWidth;
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
         var heightAnimation = new DoubleAnimation
         {
@@ -489,6 +575,8 @@ public partial class MainWindow : Window
         _nodeNotificationTimer.Stop();
         NodeNotificationContent.BeginAnimation(OpacityProperty, null);
         NodeNotificationContent.Visibility = Visibility.Collapsed;
+        IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
+        CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
         CompactBatteryContent.Visibility = Visibility.Visible;
         ClockText.Visibility = Visibility.Visible;
         _lastInteractionUtc = DateTime.UtcNow;
@@ -496,12 +584,12 @@ public partial class MainWindow : Window
         var animation = new DoubleAnimation
         {
             From = IslandSurface.Width,
-            To = 180,
+            To = CompactWidth,
             Duration = TimeSpan.FromMilliseconds(180),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
             FillBehavior = FillBehavior.Stop
         };
-        animation.Completed += (_, _) => IslandSurface.Width = 180;
+        animation.Completed += (_, _) => IslandSurface.Width = CompactWidth;
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
         var heightAnimation = new DoubleAnimation
         {
@@ -730,7 +818,8 @@ public partial class MainWindow : Window
     {
         _isIdleNotch = true;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
-        CompactContent.Margin = new Thickness(0, 1, 0, 0);
+        CompactContent.Width = IdleNotchWidth;
+        CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 10;
         // A notch is flush with the top edge: no horizontal inset and no rounded top corners.
         IslandSurface.Padding = new Thickness(0);
@@ -760,7 +849,8 @@ public partial class MainWindow : Window
 
         _isIdleNotch = false;
         CompactBatteryContent.Visibility = Visibility.Visible;
-        CompactContent.Margin = new Thickness(0, 8, 0, 0);
+        CompactContent.Width = CompactWidth - 36;
+        CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 13;
         IslandSurface.Padding = new Thickness(18, 0, 18, 0);
         if (!animate)

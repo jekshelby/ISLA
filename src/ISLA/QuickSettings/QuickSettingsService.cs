@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Management;
+using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Windows.Devices.Radios;
 
 namespace ISLA.QuickSettings;
@@ -22,18 +24,55 @@ public sealed class QuickSettingsService
     {
         var (volume, muted) = GetVolume();
         var power = System.Windows.Forms.SystemInformation.PowerStatus;
+        var batteryPercent = GetBatteryPercent(power.BatteryLifePercent);
         var radios = await GetRadioStatesAsync();
         var brightness = GetBrightness();
 
         return new QuickSettingsState(
             volume,
             muted,
-            power.BatteryLifePercent >= 0 ? (int)Math.Round(power.BatteryLifePercent * 100) : -1,
+            batteryPercent,
             power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online,
             radios.WiFi,
             radios.Bluetooth,
             brightness < 0 ? "Unavailable" : $"{brightness}%",
             brightness);
+    }
+
+    private static int GetBatteryPercent(float systemPercent)
+    {
+        if (systemPercent >= 0 && systemPercent <= 1)
+        {
+            return Math.Clamp((int)Math.Round(systemPercent * 100), 0, 100);
+        }
+
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "root\\CIMV2",
+                "SELECT EstimatedChargeRemaining FROM Win32_Battery");
+            using var batteries = searcher.Get();
+            var battery = batteries.Cast<ManagementObject>().FirstOrDefault();
+            if (battery?["EstimatedChargeRemaining"] is not null &&
+                int.TryParse(battery["EstimatedChargeRemaining"].ToString(), out var percent))
+            {
+                return Math.Clamp(percent, 0, 100);
+            }
+        }
+        catch (ManagementException)
+        {
+            return -1;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return -1;
+        }
+        catch (InvalidOperationException)
+        {
+            return -1;
+        }
+
+        return -1;
     }
 
     public void SetVolume(double value)
@@ -118,13 +157,54 @@ public sealed class QuickSettingsService
             var radios = await Radio.GetRadiosAsync();
             var wifi = radios.FirstOrDefault(radio => radio.Kind == RadioKind.WiFi);
             var bluetooth = radios.FirstOrDefault(radio => radio.Kind == RadioKind.Bluetooth);
-            return (
-                wifi is null ? "Unavailable" : wifi.State.ToString(),
-                bluetooth is null ? "Unavailable" : bluetooth.State.ToString());
+            var wifiStatus = wifi is null ? "Unavailable" : wifi.State.ToString();
+            if (wifiStatus == "On")
+            {
+                var networkName = await GetConnectedWifiNameAsync();
+                if (!string.IsNullOrWhiteSpace(networkName))
+                {
+                    wifiStatus = $"On — {networkName}";
+                }
+            }
+
+            return (wifiStatus, bluetooth is null ? "Unavailable" : bluetooth.State.ToString());
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or COMException)
         {
             return ("Permission unavailable", "Permission unavailable");
+        }
+    }
+
+    private static async Task<string?> GetConnectedWifiNameAsync()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "netsh.exe",
+                Arguments = "wlan show interfaces",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true
+            });
+            if (process is null)
+            {
+                return null;
+            }
+
+            var output = await process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+            {
+                return null;
+            }
+
+            var match = Regex.Match(output, @"(?m)^\s*SSID\s*:\s*(?!$)(.+)$");
+            return match.Success ? match.Groups[1].Value.Trim() : null;
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return null;
         }
     }
 
