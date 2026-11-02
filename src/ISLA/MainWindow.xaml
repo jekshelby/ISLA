@@ -536,5 +536,31 @@
                 </Grid>
             </Grid>
         </Border>
+
+        <!-- Idle notch battery indicator: lives OUTSIDE IslandSurface so the surface's
+             size animation / ClipToBounds can never cut it. Fixed notch size, shown only
+             once the notch has finished shrinking. -->
+        <Path x:Name="IdleBatteryTrack"
+              Visibility="Collapsed"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Stroke="#000000"
+              StrokeThickness="1"
+              StrokeLineJoin="Round"
+              StrokeStartLineCap="Flat"
+              StrokeEndLineCap="Flat"
+              Fill="Transparent"
+              IsHitTestVisible="False" />
+        <Path x:Name="IdleBatteryEdge"
+              Visibility="Collapsed"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Stroke="#38D46A"
+              StrokeThickness="1"
+              StrokeLineJoin="Round"
+              StrokeStartLineCap="Flat"
+              StrokeEndLineCap="Flat"
+              Fill="Transparent"
+              IsHitTestVisible="False" />
     </Grid>
 </Window>

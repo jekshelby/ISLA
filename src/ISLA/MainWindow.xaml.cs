@@ -39,6 +39,9 @@ public partial class MainWindow : Window
     private const double NotificationHorizontalPadding = 4;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     private const double IdleNotchHeight = CompactHeight * 0.5;
+    // Bottom corner radius of the idle notch (same value used for IslandSurface.CornerRadius).
+    private const double IdleNotchRadius = IdleNotchHeight / 2;
+    private const double IdleBatteryStroke = 1;
     private const double NormalTopInset = 6;
     private const double ExpandedWidth = 520;
     private const double MediaHeight = 280;
@@ -127,6 +130,7 @@ public partial class MainWindow : Window
     private DateTime _mediaStateCapturedAtUtc;
     private DateTime _lastInteractionUtc;
     private bool _isIdleNotch;
+    private int _lastBatteryPercent = -1;
     private bool _refreshingMedia;
     private bool _refreshingSettings;
     private System.Windows.Media.Brush _normalBatteryBrush = System.Windows.Media.Brushes.White;
@@ -321,7 +325,9 @@ public partial class MainWindow : Window
 
             SetText(BatteryValueText, state.BatteryPercent < 0 ? "Unknown" : $"{state.BatteryPercent}%");
             SetText(CompactBatteryPercentText, state.BatteryPercent < 0 ? "--%" : $"{state.BatteryPercent}%");
+            _lastBatteryPercent = state.BatteryPercent;
             SetCompactBatteryRing(state.BatteryPercent);
+            SetIdleBatteryEdge(state.BatteryPercent);
             CompactChargingIcon.Visibility = state.IsPluggedIn ? Visibility.Visible : Visibility.Collapsed;
             if (_lastCharging is bool previousCharging && previousCharging != state.IsPluggedIn)
             {
@@ -384,6 +390,110 @@ public partial class MainWindow : Window
             ]
         };
         CompactBatteryRing.Data = new PathGeometry([figure]);
+    }
+
+    private void SetIdleBatteryEdge(int percent)
+    {
+        // Fixed notch size: independent from the island's animated size, so never clipped.
+        // The stroke is centred on a path inset by half the thickness so it stays fully
+        // inside the notch bounds.
+        const double inset = IdleBatteryStroke / 2;
+        const double left = inset;
+        const double right = IdleNotchWidth - inset;
+        const double top = 0;                       // flush with the screen edge (no top line)
+        const double bottom = IdleNotchHeight - inset;
+        const double r = IdleNotchRadius - inset;   // follows the notch's bottom radius
+        var size = new System.Windows.Size(r, r);
+
+        IdleBatteryTrack.Width = IdleBatteryEdge.Width = IdleNotchWidth;
+        IdleBatteryTrack.Height = IdleBatteryEdge.Height = IdleNotchHeight;
+
+        // Track: left side -> bottom-left curve -> bottom line -> bottom-right curve -> right side.
+        var track = new PathFigure { StartPoint = new System.Windows.Point(left, top), IsClosed = false };
+        track.Segments.Add(new LineSegment(new System.Windows.Point(left, bottom - r), true));
+        track.Segments.Add(new ArcSegment(new System.Windows.Point(left + r, bottom), size, 0, false, SweepDirection.Counterclockwise, true));
+        track.Segments.Add(new LineSegment(new System.Windows.Point(right - r, bottom), true));
+        track.Segments.Add(new ArcSegment(new System.Windows.Point(right, bottom - r), size, 0, false, SweepDirection.Counterclockwise, true));
+        track.Segments.Add(new LineSegment(new System.Windows.Point(right, top), true));
+        var trackGeometry = new PathGeometry();
+        trackGeometry.Figures.Add(track);
+        trackGeometry.Freeze();
+        IdleBatteryTrack.Data = trackGeometry;
+
+        // Progress runs along the WHOLE outline, left -> right:
+        // left side, bottom-left curve, bottom line, bottom-right curve, right side.
+        if (percent < 0)
+        {
+            IdleBatteryEdge.Data = Geometry.Empty;
+            return;
+        }
+
+        var progress = Math.Clamp(percent, 0, 100) / 100d;
+        var sideLength = bottom - r - top;
+        var arcLength = Math.PI * r / 2;
+        var lineLength = (right - r) - (left + r);
+        var totalLength = sideLength * 2 + arcLength * 2 + lineLength;
+        var remaining = totalLength * progress;
+        if (remaining <= 0.01)
+        {
+            IdleBatteryEdge.Data = Geometry.Empty;
+            return;
+        }
+
+        var figure = new PathFigure { StartPoint = new System.Windows.Point(left, top), IsClosed = false };
+
+        // 1) left side (top -> down)
+        var take = Math.Min(remaining, sideLength);
+        figure.Segments.Add(new LineSegment(new System.Windows.Point(left, top + take), true));
+        remaining -= take;
+
+        // 2) bottom-left curve (9 o'clock -> 6 o'clock)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, arcLength);
+            var t = take / arcLength;
+            var angle = (180 - 90 * t) * Math.PI / 180;
+            var cx = left + r;
+            var cy = bottom - r;
+            figure.Segments.Add(new ArcSegment(
+                new System.Windows.Point(cx + r * Math.Cos(angle), cy + r * Math.Sin(angle)),
+                size, 0, false, SweepDirection.Counterclockwise, true));
+            remaining -= take;
+        }
+
+        // 3) bottom line (left -> right)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, lineLength);
+            figure.Segments.Add(new LineSegment(new System.Windows.Point(left + r + take, bottom), true));
+            remaining -= take;
+        }
+
+        // 4) bottom-right curve (6 o'clock -> 3 o'clock)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, arcLength);
+            var t = take / arcLength;
+            var angle = (90 - 90 * t) * Math.PI / 180;
+            var cx = right - r;
+            var cy = bottom - r;
+            figure.Segments.Add(new ArcSegment(
+                new System.Windows.Point(cx + r * Math.Cos(angle), cy + r * Math.Sin(angle)),
+                size, 0, false, SweepDirection.Counterclockwise, true));
+            remaining -= take;
+        }
+
+        // 5) right side (bottom -> up)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, sideLength);
+            figure.Segments.Add(new LineSegment(new System.Windows.Point(right, bottom - r - take), true));
+        }
+
+        var progressGeometry = new PathGeometry();
+        progressGeometry.Figures.Add(figure);
+        progressGeometry.Freeze();
+        IdleBatteryEdge.Data = progressGeometry;
     }
 
     private void NotifyWirelessChanges(QuickSettingsState state)
@@ -818,6 +928,10 @@ public partial class MainWindow : Window
     {
         _isIdleNotch = true;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
+        // Hidden until the notch has reached its final size (shown in the Completed handler below).
+        IdleBatteryEdge.Visibility = Visibility.Collapsed;
+        IdleBatteryTrack.Visibility = Visibility.Collapsed;
+        CompactChargingIcon.Visibility = Visibility.Collapsed;
         CompactContent.Width = IdleNotchWidth;
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 10;
@@ -828,12 +942,15 @@ public partial class MainWindow : Window
             MakeAnimation(IdleNotchWidth, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
         IslandSurface.BeginAnimation(HeightProperty,
             MakeAnimation(IdleNotchHeight, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
-        var notchRadiusAnimation = MakeAnimation(IdleNotchHeight / 2, TimeSpan.FromMilliseconds(320), CollapseEase);
+        var notchRadiusAnimation = MakeAnimation(IdleNotchRadius, TimeSpan.FromMilliseconds(320), CollapseEase);
         notchRadiusAnimation.Completed += (_, _) =>
         {
             if (_isIdleNotch)
             {
-                IslandSurface.CornerRadius = new CornerRadius(0, 0, IdleNotchHeight / 2, IdleNotchHeight / 2);
+                IslandSurface.CornerRadius = new CornerRadius(0, 0, IdleNotchRadius, IdleNotchRadius);
+                SetIdleBatteryEdge(_lastBatteryPercent);
+                IdleBatteryTrack.Visibility = Visibility.Visible;
+                IdleBatteryEdge.Visibility = Visibility.Visible;
             }
         };
         BeginAnimation(IslandRadiusProperty, notchRadiusAnimation, HandoffBehavior.SnapshotAndReplace);
@@ -849,6 +966,8 @@ public partial class MainWindow : Window
 
         _isIdleNotch = false;
         CompactBatteryContent.Visibility = Visibility.Visible;
+        IdleBatteryEdge.Visibility = Visibility.Collapsed;
+        IdleBatteryTrack.Visibility = Visibility.Collapsed;
         CompactContent.Width = CompactWidth - 36;
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 13;
