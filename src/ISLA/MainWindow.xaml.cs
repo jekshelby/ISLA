@@ -34,6 +34,9 @@ public partial class MainWindow : Window
     // ---- Island geometry -------------------------------------------------------------
     private const double CompactWidth = 180;
     private const double CompactHeight = 34;
+    private const double IdleNotchWidth = CompactWidth * 0.3;
+    private const double IdleNotchHeight = CompactHeight * 0.5;
+    private const double NormalTopInset = 6;
     private const double ExpandedWidth = 520;
     private const double MediaHeight = 280;
     private const double TimerHeight = 280;
@@ -95,6 +98,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _systemStateTimer;
     private readonly DispatcherTimer _nodeNotificationTimer;
     private readonly DispatcherTimer _windowsNotificationPollTimer;
+    private readonly DispatcherTimer _idleTimer;
     private readonly WindowsToastService _windowsToastService = new();
     private readonly WindowsNotificationService _windowsNotificationService = new();
     private readonly NotifyIcon _trayIcon;
@@ -115,6 +119,8 @@ public partial class MainWindow : Window
     private DateTime _nodeNotificationUntil;
     private ISLA.Media.MediaState? _lastMediaState;
     private DateTime _mediaStateCapturedAtUtc;
+    private DateTime _lastInteractionUtc;
+    private bool _isIdleNotch;
     private bool _refreshingMedia;
     private bool _refreshingSettings;
     private System.Windows.Media.Brush _normalBatteryBrush = System.Windows.Media.Brushes.White;
@@ -143,6 +149,8 @@ public partial class MainWindow : Window
         _nodeNotificationTimer.Tick += NodeNotificationTimer_Tick;
         _windowsNotificationPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _windowsNotificationPollTimer.Tick += WindowsNotificationPollTimer_Tick;
+        _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _idleTimer.Tick += IdleTimer_Tick;
         Loaded += MainWindow_Loaded;
         Deactivated += MainWindow_Deactivated;
     }
@@ -156,6 +164,8 @@ public partial class MainWindow : Window
         _settingsRefreshTimer.Start();
         _pomodoroTimer.Start();
         _systemStateTimer.Start();
+        _lastInteractionUtc = DateTime.UtcNow;
+        _idleTimer.Start();
         _windowsNotificationService.NotificationReceived += WindowsNotificationService_NotificationReceived;
         _windowsNotificationService.Error += WindowsNotificationService_Error;
         try
@@ -434,6 +444,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        ExitIdleNotch(animate: false);
+        _lastInteractionUtc = DateTime.UtcNow;
         NodeNotificationAppText.Text = appName;
         NodeNotificationText.Text = message;
         CompactContent.Visibility = Visibility.Visible;
@@ -447,12 +459,12 @@ public partial class MainWindow : Window
         var animation = new DoubleAnimation
         {
             From = IslandSurface.Width,
-            To = Math.Max(IslandSurface.Width, CompactWidth * 1.2),
+            To = Math.Max(IslandSurface.Width, CompactWidth * 1.4),
             Duration = TimeSpan.FromMilliseconds(180),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
             FillBehavior = FillBehavior.Stop
         };
-        animation.Completed += (_, _) => IslandSurface.Width = CompactWidth * 1.2;
+        animation.Completed += (_, _) => IslandSurface.Width = CompactWidth * 1.4;
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
         var heightAnimation = new DoubleAnimation
         {
@@ -479,6 +491,7 @@ public partial class MainWindow : Window
         NodeNotificationContent.Visibility = Visibility.Collapsed;
         CompactBatteryContent.Visibility = Visibility.Visible;
         ClockText.Visibility = Visibility.Visible;
+        _lastInteractionUtc = DateTime.UtcNow;
 
         var animation = new DoubleAnimation
         {
@@ -665,7 +678,7 @@ public partial class MainWindow : Window
         // The window is a fixed transparent canvas, so this only needs to run once.
         var workArea = SystemParameters.WorkArea;
         Left = workArea.Left + (workArea.Width - Width) / 2;
-        Top = workArea.Top + 12;
+        Top = workArea.Top + NormalTopInset;
     }
 
     private void MainWindow_SourceInitialized(object? sender, EventArgs e)
@@ -679,6 +692,13 @@ public partial class MainWindow : Window
     private void Island_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
         _collapseTimer.Stop();
+        _lastInteractionUtc = DateTime.UtcNow;
+        if (_isIdleNotch)
+        {
+            ExitIdleNotch();
+            return;
+        }
+
         if (!_isPinned)
         {
             SetExpanded(true);
@@ -693,6 +713,89 @@ public partial class MainWindow : Window
             _collapseTimer.Interval = TimeSpan.FromMilliseconds(500);
             _collapseTimer.Start();
         }
+    }
+
+    private void IdleTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isIdleNotch || _isExpanded || NodeNotificationContent.Visibility == Visibility.Visible ||
+            DateTime.UtcNow - _lastInteractionUtc < TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+
+        EnterIdleNotch();
+    }
+
+    private void EnterIdleNotch()
+    {
+        _isIdleNotch = true;
+        CompactBatteryContent.Visibility = Visibility.Collapsed;
+        CompactContent.Margin = new Thickness(0, 1, 0, 0);
+        ClockText.FontSize = 10;
+        // A notch is flush with the top edge: no horizontal inset and no rounded top corners.
+        IslandSurface.Padding = new Thickness(0);
+        AnimateWindowTop(SystemParameters.WorkArea.Top, TimeSpan.FromMilliseconds(320), CollapseEase);
+        IslandSurface.BeginAnimation(WidthProperty,
+            MakeAnimation(IdleNotchWidth, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
+        IslandSurface.BeginAnimation(HeightProperty,
+            MakeAnimation(IdleNotchHeight, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
+        var notchRadiusAnimation = MakeAnimation(IdleNotchHeight / 2, TimeSpan.FromMilliseconds(320), CollapseEase);
+        notchRadiusAnimation.Completed += (_, _) =>
+        {
+            if (_isIdleNotch)
+            {
+                IslandSurface.CornerRadius = new CornerRadius(0, 0, IdleNotchHeight / 2, IdleNotchHeight / 2);
+            }
+        };
+        BeginAnimation(IslandRadiusProperty, notchRadiusAnimation, HandoffBehavior.SnapshotAndReplace);
+        Fade(ClockText, 0, 90, 0, FadeEase, () => Fade(ClockText, 1, 150, 30, FadeEase));
+    }
+
+    private void ExitIdleNotch(bool animate = true)
+    {
+        if (!_isIdleNotch)
+        {
+            return;
+        }
+
+        _isIdleNotch = false;
+        CompactBatteryContent.Visibility = Visibility.Visible;
+        CompactContent.Margin = new Thickness(0, 8, 0, 0);
+        ClockText.FontSize = 13;
+        IslandSurface.Padding = new Thickness(18, 0, 18, 0);
+        if (!animate)
+        {
+            IslandSurface.BeginAnimation(WidthProperty, null);
+            IslandSurface.BeginAnimation(HeightProperty, null);
+            BeginAnimation(IslandRadiusProperty, null);
+            IslandSurface.Width = CompactWidth;
+            IslandSurface.Height = CompactHeight;
+            IslandRadius = CompactRadius;
+            Top = SystemParameters.WorkArea.Top + NormalTopInset;
+            return;
+        }
+
+        AnimateWindowTop(SystemParameters.WorkArea.Top + NormalTopInset,
+            TimeSpan.FromMilliseconds(280), ExpandEase);
+        IslandSurface.BeginAnimation(WidthProperty,
+            MakeAnimation(CompactWidth, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+        IslandSurface.BeginAnimation(HeightProperty,
+            MakeAnimation(CompactHeight, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+        BeginAnimation(IslandRadiusProperty,
+            MakeAnimation(CompactRadius, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+        Fade(ClockText, 0, 70, 0, FadeEase, () => Fade(ClockText, 1, 140, 60, FadeEase));
+    }
+
+    private void AnimateWindowTop(double target, TimeSpan duration, IEasingFunction ease)
+    {
+        BeginAnimation(TopProperty, null);
+        var animation = new DoubleAnimation(Top, target, duration)
+        {
+            EasingFunction = ease,
+            FillBehavior = FillBehavior.Stop
+        };
+        animation.Completed += (_, _) => Top = target;
+        BeginAnimation(TopProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
     private void MainWindow_Deactivated(object? sender, EventArgs e)
@@ -732,6 +835,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (expanded)
+        {
+            ExitIdleNotch(animate: false);
+        }
+
         _isExpanded = expanded;
         var version = ++_expandVersion;
 
@@ -743,6 +851,7 @@ public partial class MainWindow : Window
 
         if (expanded)
         {
+            Fade(CompactContent, 0, 100, 0, FadeEase);
             // The content is laid out once at its final size; the island simply reveals it.
             ExpandedContent.BeginAnimation(HeightProperty, null);
             ExpandedContent.Height = ExpandedContentHeight;
@@ -778,6 +887,8 @@ public partial class MainWindow : Window
                     ExpandedContent.Visibility = Visibility.Collapsed;
                 }
             });
+            Fade(CompactContent, 1, 130, 140, FadeEase);
+            _lastInteractionUtc = DateTime.UtcNow;
 
         }
     }
@@ -809,6 +920,7 @@ public partial class MainWindow : Window
         _pomodoroTimer.Stop();
         _systemStateTimer.Stop();
         _nodeNotificationTimer.Stop();
+        _idleTimer.Stop();
         _windowsNotificationPollTimer.Stop();
         _windowsNotificationService.Dispose();
         _trayIcon.Visible = false;

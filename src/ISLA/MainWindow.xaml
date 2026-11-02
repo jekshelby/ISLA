@@ -94,7 +94,7 @@
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Center"
-                          Width="174">
+                          Width="210">
                         <StackPanel HorizontalAlignment="Stretch">
                             <TextBlock x:Name="NodeNotificationAppText"
                                        Style="{StaticResource ContentSubtitleStyle}"
