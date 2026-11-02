@@ -127,7 +127,14 @@ public partial class MainWindow : Window
     private bool _lowBatteryNotified;
     private DateTime _nodeNotificationUntil;
     private ISLA.Media.MediaState? _lastMediaState;
-    private DateTime _mediaStateCapturedAtUtc;
+    // Local playback clock: the position reported by Windows is only refreshed occasionally
+    // (and can be stale), so we run our own clock and only re-sync it when it makes sense.
+    private TimeSpan _mediaAnchorPosition;
+    private DateTime _mediaAnchorUtc;
+    private TimeSpan _mediaLastReportedPosition;
+    private bool _mediaAnchorPlaying;
+    private string? _mediaTrackKey;
+    private static readonly TimeSpan MediaSeekTolerance = TimeSpan.FromSeconds(1.5);
     private DateTime _lastInteractionUtc;
     private bool _isIdleNotch;
     private int _lastBatteryPercent = -1;
@@ -743,8 +750,8 @@ public partial class MainWindow : Window
         try
         {
             var state = await _mediaService.GetCurrentStateAsync();
+            SyncMediaAnchor(state);
             _lastMediaState = state;
-            _mediaStateCapturedAtUtc = DateTime.UtcNow;
             if (state.PlaybackStatus == "Playing")
             {
                 _mediaProgressTimer.Start();
@@ -779,12 +786,67 @@ public partial class MainWindow : Window
         }
     }
 
-    private void UpdateMediaProgressDisplay(ISLA.Media.MediaState state)
+    /// <summary>
+    /// Re-syncs the local playback clock with what Windows reports. The clock is only moved
+    /// when the track/play state changes, the user seeked, or the player is ahead of us.
+    /// A stale or slightly-behind reported position is ignored, so the time never jumps
+    /// backwards, repeats, or freezes between polls.
+    /// </summary>
+    private void SyncMediaAnchor(ISLA.Media.MediaState state)
     {
-        var position = state.Position;
-        if (state.PlaybackStatus == "Playing")
+        var now = DateTime.UtcNow;
+        var playing = state.PlaybackStatus == "Playing";
+        var trackKey = $"{state.Title}|{state.Artist}|{state.Album}|{state.Duration.Ticks}";
+        var reported = state.Position;
+        if (reported < TimeSpan.Zero)
         {
-            position += DateTime.UtcNow - _mediaStateCapturedAtUtc;
+            reported = TimeSpan.Zero;
+        }
+
+        if (state.Duration > TimeSpan.Zero && reported > state.Duration)
+        {
+            reported = state.Duration;
+        }
+
+        var trackChanged = !string.Equals(trackKey, _mediaTrackKey, StringComparison.Ordinal);
+        var playingChanged = playing != _mediaAnchorPlaying;
+
+        if (trackChanged || playingChanged || !playing)
+        {
+            // New song, play/pause toggled, or paused: the reported value is trustworthy.
+            _mediaAnchorPosition = reported;
+            _mediaAnchorUtc = now;
+        }
+        else if (reported != _mediaLastReportedPosition)
+        {
+            // Player published a new position while playing.
+            var drift = reported - GetEstimatedMediaPosition(state);
+            if (drift > TimeSpan.Zero || drift < -MediaSeekTolerance)
+            {
+                // Ahead of us, or a real seek backwards: follow the player.
+                _mediaAnchorPosition = reported;
+                _mediaAnchorUtc = now;
+            }
+            // Slightly behind: keep our own clock (prevents the time repeating).
+        }
+        // Unchanged reported value while playing = stale; keep extrapolating locally (no freeze).
+
+        _mediaAnchorPlaying = playing;
+        _mediaTrackKey = trackKey;
+        _mediaLastReportedPosition = reported;
+    }
+
+    private TimeSpan GetEstimatedMediaPosition(ISLA.Media.MediaState state)
+    {
+        var position = _mediaAnchorPosition;
+        if (_mediaAnchorPlaying)
+        {
+            position += DateTime.UtcNow - _mediaAnchorUtc;
+        }
+
+        if (position < TimeSpan.Zero)
+        {
+            position = TimeSpan.Zero;
         }
 
         if (state.Duration > TimeSpan.Zero && position > state.Duration)
@@ -792,6 +854,12 @@ public partial class MainWindow : Window
             position = state.Duration;
         }
 
+        return position;
+    }
+
+    private void UpdateMediaProgressDisplay(ISLA.Media.MediaState state)
+    {
+        var position = GetEstimatedMediaPosition(state);
         var progress = state.Duration > TimeSpan.Zero
             ? Math.Clamp(position.TotalSeconds / state.Duration.TotalSeconds, 0, 1)
             : 0;
@@ -801,34 +869,14 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// The position only arrives once per second. Instead of jumping, glide linearly to the
-    /// new value over the next tick so the bar moves continuously.
+    /// The progress timer ticks every 125 ms with an already-smooth position, so the value is
+    /// set directly. (The old 950 ms glide was restarted every tick and made the bar lag.)
     /// </summary>
     private void SetMediaProgress(double progress)
     {
         var property = System.Windows.Controls.ProgressBar.ValueProperty;
-        var current = MediaProgress.Value;
-
-        // Seek backwards, new track or a big jump: snap instead of gliding.
-        if (progress < current - 0.0001 || progress - current > 0.2)
-        {
-            MediaProgress.BeginAnimation(property, null);
-            MediaProgress.Value = progress;
-            return;
-        }
-
-        if (Math.Abs(progress - current) < 0.00001)
-        {
-            return;
-        }
-
-        MediaProgress.BeginAnimation(
-            property,
-            new DoubleAnimation(current, progress, TimeSpan.FromMilliseconds(950))
-            {
-                FillBehavior = FillBehavior.HoldEnd
-            },
-            HandoffBehavior.SnapshotAndReplace);
+        MediaProgress.BeginAnimation(property, null);
+        MediaProgress.Value = progress;
     }
 
     private void SetPlayingIcon(bool isPlaying)
