@@ -38,6 +38,8 @@ public partial class MainWindow : Window
     private const double CompactHorizontalPadding = 5;
     private const double NotificationHorizontalPadding = 4;
     private const double IdleNotchWidth = CompactWidth * 0.3;
+    // Wider notch used while media plays: clock on the left, spectrum on the right.
+    private const double IdleMusicNotchWidth = 82;
     private const double IdleNotchHeight = CompactHeight * 0.5;
     // Bottom corner radius of the idle notch (same value used for IslandSurface.CornerRadius).
     private const double IdleNotchRadius = IdleNotchHeight / 2;
@@ -125,6 +127,37 @@ public partial class MainWindow : Window
     private string? _lastWiFiStatus;
     private string? _lastBluetoothStatus;
     private bool _lowBatteryNotified;
+    private bool _criticalBatteryNotified;
+    private bool _fullBatteryNotified;
+    private bool _powerStatusUsable;
+    private int _lastRemainingMinutes = -2;
+    private double _idleNotchWidth = IdleNotchWidth;
+
+    // Notification queue: nothing is dropped or overwritten any more.
+    private sealed record QueuedNotification(string App, string Message, TimeSpan Duration, DateTime QueuedUtc);
+    private readonly Queue<QueuedNotification> _notificationQueue = new();
+    private bool _nodeNotificationActive;
+    private DateTime _nodeNotificationShownUtc;
+    private const int MaxQueuedNotifications = 8;
+    private static readonly TimeSpan MinNotificationTime = TimeSpan.FromMilliseconds(1600);
+    private static readonly TimeSpan NotificationMaxAge = TimeSpan.FromMinutes(2);
+
+    // Media: event-driven refresh, seeking, album art
+    private readonly MediaWatcher _mediaWatcher = new();
+    private readonly DispatcherTimer _mediaDebounceTimer;
+    private bool _mediaRefreshPending;
+    private bool _seeking;
+    private double _seekRatio;
+    private string? _coverKey;
+    private int _coverAttempts;
+    private bool _coverLoaded;
+    private bool _coverLoading;
+
+    // Wi-Fi / Bluetooth detail panel
+    private readonly WirelessListService _wirelessService = new();
+    private bool _radioViewOpen;
+    private string _radioTag = "WiFi";
+    private int _radioLoadVersion;
     private DateTime _nodeNotificationUntil;
     private ISLA.Media.MediaState? _lastMediaState;
     // Local playback clock: the position reported by Windows is only refreshed occasionally
@@ -171,6 +204,8 @@ public partial class MainWindow : Window
         _mediaRefreshTimer.Tick += MediaRefreshTimer_Tick;
         _mediaProgressTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(125) };
         _mediaProgressTimer.Tick += MediaProgressTimer_Tick;
+        _mediaDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+        _mediaDebounceTimer.Tick += MediaDebounceTimer_Tick;
         _settingsRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _settingsRefreshTimer.Tick += SettingsRefreshTimer_Tick;
         _pomodoroTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
@@ -198,6 +233,9 @@ public partial class MainWindow : Window
         _systemStateTimer.Start();
         _lastInteractionUtc = DateTime.UtcNow;
         _idleTimer.Start();
+        CheckBatteryFast();
+        Microsoft.Win32.SystemEvents.PowerModeChanged += SystemEvents_PowerModeChanged;
+        _ = StartMediaWatcherAsync();
         _windowsNotificationService.NotificationReceived += WindowsNotificationService_NotificationReceived;
         _windowsNotificationService.Error += WindowsNotificationService_Error;
         try
@@ -324,6 +362,17 @@ public partial class MainWindow : Window
         await RefreshSettingsAsync();
     }
 
+    private DateTime _lastSettingsRefreshUtc = DateTime.MinValue;
+
+    /// <summary>Refresh when opening the island / Settings tab, but not on every hover.</summary>
+    private void RefreshSettingsIfStale()
+    {
+        if (DateTime.UtcNow - _lastSettingsRefreshUtc > TimeSpan.FromSeconds(3))
+        {
+            _ = RefreshSettingsAsync();
+        }
+    }
+
     private async Task RefreshSettingsAsync()
     {
         if (_refreshingSettings)
@@ -335,6 +384,7 @@ public partial class MainWindow : Window
         try
         {
             var state = await _quickSettingsService.GetStateAsync();
+            _lastSettingsRefreshUtc = DateTime.UtcNow;
 
             // Don't fight the user while they are dragging the slider.
             if (!VolumeSlider.IsMouseCaptureWithin)
@@ -345,20 +395,15 @@ public partial class MainWindow : Window
                 SetText(VolumeValueText, $"{state.Volume:P0}{(state.IsMuted ? " (muted)" : string.Empty)}");
             }
 
-            SetText(BatteryValueText, state.BatteryPercent < 0 ? "Unknown" : $"{state.BatteryPercent}%");
-            SetText(CompactBatteryPercentText, state.BatteryPercent < 0 ? "--%" : $"{state.BatteryPercent}%");
-            _lastBatteryPercent = state.BatteryPercent;
-            SetCompactBatteryRing(state.BatteryPercent);
-            SetIdleBatteryEdge(state.BatteryPercent);
-            CompactChargingIcon.Visibility = state.IsPluggedIn ? Visibility.Visible : Visibility.Collapsed;
-            if (_lastCharging is bool previousCharging && previousCharging != state.IsPluggedIn)
+            // The fast power poll owns the battery state; this is only the fallback when
+            // Windows reports no usable battery information.
+            if (!_powerStatusUsable)
             {
-                ShowNodeNotification(state.IsPluggedIn ? "Charging" : "Not charging");
+                ApplyBatteryState(state.BatteryPercent, state.IsPluggedIn,
+                    state.IsPluggedIn ? "Plugged in" : "On battery");
             }
-            _lastCharging = state.IsPluggedIn;
+
             NotifyWirelessChanges(state);
-            NotifyLowBattery(state);
-            SetText(PowerStatusText, state.IsPluggedIn ? "Plugged in" : "On battery");
             SetText(WiFiStatusText, state.WiFiStatus);
             SetText(BluetoothStatusText, state.BluetoothStatus);
             if (!BrightnessSlider.IsMouseCaptureWithin && state.BrightnessPercent >= 0)
@@ -369,7 +414,8 @@ public partial class MainWindow : Window
             SetText(BrightnessValueText, state.BrightnessPercent < 0 ? "--" : $"{state.BrightnessPercent}%");
             SetText(SettingsStatusText, state.BrightnessPercent < 0
                 ? "Brightness is unavailable for this display"
-                : "Click Wi-Fi or Bluetooth to toggle");
+                : "Tap Wi-Fi or Bluetooth to see details");
+            UpdateRadioPanel();
         }
 
         catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
@@ -423,13 +469,13 @@ public partial class MainWindow : Window
         IdleBatteryEdge.Stroke = GetBatteryBrush(percent);
         const double inset = IdleBatteryStroke / 2;
         const double left = inset;
-        const double right = IdleNotchWidth - inset;
+        var right = _idleNotchWidth - inset;
         const double top = 0;                       // flush with the screen edge (no top line)
         const double bottom = IdleNotchHeight - inset;
         const double r = IdleNotchRadius - inset;   // follows the notch's bottom radius
         var size = new System.Windows.Size(r, r);
 
-        IdleBatteryTrack.Width = IdleBatteryEdge.Width = IdleNotchWidth;
+        IdleBatteryTrack.Width = IdleBatteryEdge.Width = _idleNotchWidth;
         IdleBatteryTrack.Height = IdleBatteryEdge.Height = IdleNotchHeight;
 
         // Track: left side -> bottom-left curve -> bottom line -> bottom-right curve -> right side.
@@ -526,15 +572,15 @@ public partial class MainWindow : Window
         {
             if (state.WiFiStatus.StartsWith("On — ", StringComparison.Ordinal))
             {
-                ShowNodeNotification($"Wi-Fi connected to {state.WiFiStatus[5..]}");
+                ShowNodeNotification($"Wi-Fi connected to {state.WiFiStatus[5..]}", dropIfExpanded: true);
             }
             else if (state.WiFiStatus == "On")
             {
-                ShowNodeNotification("Wi-Fi on");
+                ShowNodeNotification("Wi-Fi on", dropIfExpanded: true);
             }
             else if (state.WiFiStatus == "Off")
             {
-                ShowNodeNotification("Wi-Fi off");
+                ShowNodeNotification("Wi-Fi off", dropIfExpanded: true);
             }
         }
         _lastWiFiStatus = state.WiFiStatus;
@@ -543,83 +589,522 @@ public partial class MainWindow : Window
         {
             if (state.BluetoothStatus == "On")
             {
-                ShowNodeNotification("Bluetooth on");
+                ShowNodeNotification("Bluetooth on", dropIfExpanded: true);
             }
             else if (state.BluetoothStatus == "Off")
             {
-                ShowNodeNotification("Bluetooth off");
+                ShowNodeNotification("Bluetooth off", dropIfExpanded: true);
             }
         }
         _lastBluetoothStatus = state.BluetoothStatus;
     }
 
-    private void NotifyLowBattery(QuickSettingsState state)
-    {
-        if (state.IsPluggedIn || state.BatteryPercent < 0 || state.BatteryPercent > 20)
-        {
-            _lowBatteryNotified = false;
-            return;
-        }
+    // =================================================================================
+    //  Battery (fast path: reacts within ~0.5 s of plugging/unplugging)
+    // =================================================================================
 
-        if (!_lowBatteryNotified)
+    private void SystemEvents_PowerModeChanged(object? sender, Microsoft.Win32.PowerModeChangedEventArgs e)
+    {
+        _ = Dispatcher.InvokeAsync(async () =>
         {
-            _lowBatteryNotified = true;
-            ShowNodeNotification("Battery low", $"{state.BatteryPercent}% remaining", TimeSpan.FromSeconds(4));
+            CheckBatteryFast();
+            if (e.Mode == Microsoft.Win32.PowerModes.Resume)
+            {
+                await RefreshSettingsAsync();
+                await RefreshMediaAsync();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Cheap (a single GetSystemPowerStatus call), so it runs on the 500 ms system timer.
+    /// UI work only happens when the level, charger state or remaining time actually changed.
+    /// </summary>
+    private void CheckBatteryFast()
+    {
+        try
+        {
+            var power = SystemInformation.PowerStatus;
+            var flags = power.BatteryChargeStatus;
+            var usable = !flags.HasFlag(BatteryChargeStatus.NoSystemBattery) && flags != BatteryChargeStatus.Unknown;
+            _powerStatusUsable = usable;
+            if (!usable)
+            {
+                return;
+            }
+
+            var percent = (int)Math.Round(Math.Clamp(power.BatteryLifePercent, 0f, 1f) * 100);
+            var plugged = power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online;
+            var charging = flags.HasFlag(BatteryChargeStatus.Charging);
+            var seconds = power.BatteryLifeRemaining;
+            // Rounded to 5 minutes so the "time left" text doesn't flicker.
+            var remainingMinutes = !plugged && seconds > 0 ? (int)Math.Round(seconds / 60.0 / 5) * 5 : -1;
+
+            if (percent == _lastBatteryPercent && _lastCharging == plugged && remainingMinutes == _lastRemainingMinutes)
+            {
+                return;
+            }
+
+            _lastRemainingMinutes = remainingMinutes;
+            string status;
+            if (plugged)
+            {
+                status = percent >= 100 ? "Fully charged" : charging ? "Charging" : "Plugged in, not charging";
+            }
+            else
+            {
+                status = remainingMinutes > 0 ? $"On battery · {FormatRemaining(remainingMinutes)} left" : "On battery";
+            }
+
+            ApplyBatteryState(percent, plugged, status);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            _powerStatusUsable = false;
         }
     }
 
-    private async void RadioToggle_Click(object sender, RoutedEventArgs e)
+    private static string FormatRemaining(int minutes) =>
+        minutes >= 60 ? $"{minutes / 60}h {minutes % 60:00}m" : $"{minutes}m";
+
+    /// <summary>Single place that updates every battery readout (island, notch, settings card).</summary>
+    private void ApplyBatteryState(int percent, bool plugged, string statusText)
+    {
+        var firstRun = _lastCharging is null;
+        var levelChanged = firstRun || percent != _lastBatteryPercent;
+        var plugChanged = !firstRun && _lastCharging != plugged;
+
+        if (levelChanged)
+        {
+            _lastBatteryPercent = percent;
+            var text = percent < 0 ? "--%" : $"{percent}%";
+            SetText(BatteryValueText, percent < 0 ? "Unknown" : text);
+            SetText(CompactBatteryPercentText, text);
+            SetCompactBatteryRing(percent);
+            SetIdleBatteryEdge(percent);
+            BatteryCardIcon.Stroke = GetBatteryBrush(percent);
+        }
+
+        if (firstRun || plugChanged)
+        {
+            CompactChargingIcon.Visibility = plugged ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        SetText(PowerStatusText, statusText);
+        _lastCharging = plugged;
+
+        if (plugChanged)
+        {
+            if (percent >= 0)
+            {
+                ShowNodeNotification(plugged ? "Charging" : "On battery", $"{percent}%", dropIfExpanded: true);
+            }
+            else
+            {
+                ShowNodeNotification(plugged ? "Charging" : "Not charging", dropIfExpanded: true);
+            }
+        }
+
+        NotifyBatteryLevels(percent, plugged, firstRun);
+    }
+
+    private void NotifyBatteryLevels(int percent, bool plugged, bool firstRun)
+    {
+        if (percent < 0)
+        {
+            return;
+        }
+
+        if (plugged || percent > 20)
+        {
+            _lowBatteryNotified = false;
+        }
+
+        if (plugged || percent > 10)
+        {
+            _criticalBatteryNotified = false;
+        }
+
+        if (!plugged || percent < 95)
+        {
+            _fullBatteryNotified = false;
+        }
+
+        if (plugged)
+        {
+            if (percent >= 100 && !_fullBatteryNotified)
+            {
+                _fullBatteryNotified = true;
+                if (!firstRun)
+                {
+                    ShowNodeNotification("Fully charged", "Battery is at 100%, you can unplug", TimeSpan.FromSeconds(4));
+                }
+            }
+
+            return;
+        }
+
+        if (percent <= 10)
+        {
+            if (!_criticalBatteryNotified)
+            {
+                _criticalBatteryNotified = true;
+                _lowBatteryNotified = true;
+                ShowNodeNotification("Battery critical", $"{percent}% left, plug in now", TimeSpan.FromSeconds(5));
+            }
+        }
+        else if (percent <= 20 && !_lowBatteryNotified)
+        {
+            _lowBatteryNotified = true;
+            ShowNodeNotification("Battery low", $"{percent}% remaining", TimeSpan.FromSeconds(4));
+        }
+    }
+
+    // =================================================================================
+    //  Wi-Fi / Bluetooth detail panel (tap a card in Quick Settings)
+    // =================================================================================
+
+    private void RadioToggle_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not System.Windows.Controls.Button button || button.Tag is not string tag)
         {
             return;
         }
 
-        if (tag == "WiFi")
+        OpenRadioPanel(tag);
+    }
+
+    private void OpenRadioPanel(string tag)
+    {
+        _radioTag = tag;
+        _radioViewOpen = true;
+        var isWifi = tag == "WiFi";
+        RadioTitleText.Text = isWifi ? "Wi-Fi" : "Bluetooth";
+        RadioSettingsLinkText.Text = isWifi ? "Network settings" : "Bluetooth settings";
+        RadioList.Children.Clear();
+        SetText(RadioSubtitleText, string.Empty);
+        UpdateRadioSwitch();
+
+        Fade(SettingsPanel, 0, 90, 0, FadeEase, () =>
         {
-            OpenAvailableNetworks();
+            if (!_radioViewOpen)
+            {
+                return;
+            }
+
+            HidePanel(SettingsPanel);
+            ShowPanel(RadioPanel);
+        });
+        _ = RefreshRadioListAsync();
+    }
+
+    private void RadioBack_Click(object sender, RoutedEventArgs e)
+    {
+        _radioViewOpen = false;
+        _radioLoadVersion++;
+        Fade(RadioPanel, 0, 90, 0, FadeEase, () =>
+        {
+            if (_radioViewOpen)
+            {
+                return;
+            }
+
+            HidePanel(RadioPanel);
+            ShowPanel(SettingsPanel);
+        });
+    }
+
+    /// <summary>Instantly returns to the main settings view (used when the island collapses).</summary>
+    private void ResetRadioView()
+    {
+        if (!_radioViewOpen)
+        {
             return;
         }
 
-        var kind = tag == "WiFi" ? RadioKind.WiFi : RadioKind.Bluetooth;
+        _radioViewOpen = false;
+        _radioLoadVersion++;
+        HidePanel(RadioPanel);
+        if (_activeTab == "Settings")
+        {
+            SettingsPanel.BeginAnimation(OpacityProperty, null);
+            SettingsPanel.Opacity = 1;
+            SettingsPanel.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void UpdateRadioPanel()
+    {
+        if (_radioViewOpen)
+        {
+            UpdateRadioSwitch();
+        }
+    }
+
+    private bool IsRadioOn()
+    {
+        var status = _radioTag == "WiFi" ? _lastWiFiStatus : _lastBluetoothStatus;
+        return status is not null && status.StartsWith("On", StringComparison.Ordinal);
+    }
+
+    private void UpdateRadioSwitch() => RadioSwitch.IsChecked = IsRadioOn();
+
+    private async void RadioSwitch_Click(object sender, RoutedEventArgs e)
+    {
+        var kind = _radioTag == "WiFi" ? RadioKind.WiFi : RadioKind.Bluetooth;
+        RadioSwitch.IsEnabled = false;
+        SetText(RadioSubtitleText, RadioSwitch.IsChecked == true ? "Turning on..." : "Turning off...");
         try
         {
-            SetText(SettingsStatusText, $"Toggling {tag}...");
             await _quickSettingsService.ToggleRadioAsync(kind);
+            await Task.Delay(500); // let the radio settle before reading its state back
             await RefreshSettingsAsync();
         }
         catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
         {
-            SetText(SettingsStatusText, $"{tag} toggle unavailable: {exception.Message}");
+            SetText(RadioSubtitleText, $"Unavailable: {exception.Message}");
+        }
+        finally
+        {
+            RadioSwitch.IsEnabled = true;
+            UpdateRadioSwitch();
+        }
+
+        await RefreshRadioListAsync();
+    }
+
+    private async Task RefreshRadioListAsync()
+    {
+        var version = ++_radioLoadVersion;
+        var isWifi = _radioTag == "WiFi";
+        UpdateRadioSwitch();
+
+        if (!IsRadioOn())
+        {
+            RadioList.Children.Clear();
+            AddRadioMessage(isWifi ? "Wi-Fi is off" : "Bluetooth is off");
+            SetText(RadioSubtitleText, "Turn it on to see what's available");
+            return;
+        }
+
+        SetText(RadioSubtitleText, isWifi ? "Scanning for networks..." : "Looking for paired devices...");
+        if (RadioList.Children.Count == 0)
+        {
+            AddRadioMessage("Searching...");
+        }
+
+        IReadOnlyList<RadioListItem> items;
+        string? error = null;
+        if (isWifi)
+        {
+            (items, error) = await _wirelessService.ScanWiFiAsync();
+        }
+        else
+        {
+            items = await _wirelessService.GetBluetoothDevicesAsync();
+        }
+
+        if (version != _radioLoadVersion || !_radioViewOpen)
+        {
+            return;
+        }
+
+        RadioList.Children.Clear();
+        foreach (var item in items)
+        {
+            RadioList.Children.Add(CreateRadioRow(item, isWifi));
+        }
+
+        if (items.Count == 0)
+        {
+            AddRadioMessage(error ?? (isWifi ? "No networks found" : "No paired devices"));
+        }
+
+        UpdateRadioSubtitle(items, isWifi, error);
+    }
+
+    private void UpdateRadioSubtitle(IReadOnlyList<RadioListItem> items, bool isWifi, string? error)
+    {
+        RadioListItem? connected = null;
+        foreach (var item in items)
+        {
+            if (item.IsConnected)
+            {
+                connected = item;
+                break;
+            }
+        }
+
+        if (connected is not null)
+        {
+            SetText(RadioSubtitleText, $"Connected to {connected.Name}");
+        }
+        else if (error is not null)
+        {
+            SetText(RadioSubtitleText, isWifi ? "Couldn't scan networks" : "Couldn't read devices");
+        }
+        else
+        {
+            SetText(RadioSubtitleText, isWifi ? "Not connected" : "No device connected");
         }
     }
 
-    private void OpenAvailableNetworks()
+    private void AddRadioMessage(string text)
+    {
+        RadioList.Children.Add(new TextBlock
+        {
+            Text = text,
+            Style = (Style)FindResource("MetadataStyle"),
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            Margin = new Thickness(8, 30, 8, 0)
+        });
+    }
+
+    private System.Windows.Controls.Button CreateRadioRow(RadioListItem item, bool isWifi)
+    {
+        var text = (System.Windows.Media.Brush)FindResource("IslandText");
+        var secondary = (System.Windows.Media.Brush)FindResource("IslandTextSecondary");
+        var muted = (System.Windows.Media.Brush)FindResource("IslandMutedText");
+        var accent = (System.Windows.Media.Brush)FindResource("IslandAccent");
+        var track = (System.Windows.Media.Brush)FindResource("IslandTrack");
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        FrameworkElement icon;
+        if (isWifi)
+        {
+            var bars = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Height = 12, Margin = new Thickness(0, 0, 10, 0) };
+            for (var i = 1; i <= 4; i++)
+            {
+                bars.Children.Add(new System.Windows.Shapes.Rectangle
+                {
+                    Width = 2.5,
+                    Height = 3 + i * 2.2,
+                    RadiusX = 1,
+                    RadiusY = 1,
+                    Margin = new Thickness(0, 0, 1.5, 0),
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                    Fill = i <= item.Signal ? (item.IsConnected ? accent : text) : track
+                });
+            }
+
+            icon = bars;
+        }
+        else
+        {
+            icon = new System.Windows.Shapes.Ellipse
+            {
+                Width = 7,
+                Height = 7,
+                Margin = new Thickness(3, 0, 13, 0),
+                Fill = item.IsConnected ? accent : track
+            };
+        }
+
+        grid.Children.Add(icon);
+
+        var name = new TextBlock
+        {
+            Text = item.Name,
+            Style = (Style)FindResource("CardLabelStyle"),
+            Foreground = item.IsConnected ? text : secondary,
+            FontWeight = item.IsConnected ? FontWeights.SemiBold : FontWeights.Normal,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(name, 1);
+        grid.Children.Add(name);
+
+        var detail = new TextBlock
+        {
+            Text = item.Detail,
+            Style = (Style)FindResource("CardHintStyle"),
+            Foreground = item.IsConnected ? accent : muted,
+            Margin = new Thickness(8, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(detail, 2);
+        grid.Children.Add(detail);
+
+        var button = new System.Windows.Controls.Button
+        {
+            Style = (Style)FindResource("RadioRowButtonStyle"),
+            Content = grid,
+            Tag = item,
+            ToolTip = item.Name
+        };
+        button.Click += RadioRow_Click;
+        return button;
+    }
+
+    private async void RadioRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button { Tag: RadioListItem item })
+        {
+            return;
+        }
+
+        if (_radioTag != "WiFi")
+        {
+            // Windows has no public API to connect a paired Bluetooth device: hand over to Settings.
+            SetText(RadioSubtitleText, "Opening Bluetooth settings...");
+            OpenShellUri("ms-settings:bluetooth");
+            return;
+        }
+
+        if (item.IsConnected)
+        {
+            return;
+        }
+
+        SetText(RadioSubtitleText, $"Connecting to {item.Name}...");
+        var (success, message) = await _wirelessService.ConnectWiFiAsync(item.Id);
+        SetText(RadioSubtitleText, message);
+        if (!success && message == "Password required")
+        {
+            OpenShellUri("ms-availablenetworks:");
+            return;
+        }
+
+        await Task.Delay(600);
+        await RefreshSettingsAsync();
+        if (_radioViewOpen)
+        {
+            await RefreshRadioListAsync();
+        }
+    }
+
+    private void RadioSettingsLink_Click(object sender, RoutedEventArgs e)
+    {
+        if (_radioTag == "WiFi")
+        {
+            if (!OpenShellUri("ms-availablenetworks:"))
+            {
+                OpenShellUri("ms-settings:network-wifi");
+            }
+        }
+        else
+        {
+            OpenShellUri("ms-settings:bluetooth");
+        }
+    }
+
+    private bool OpenShellUri(string uri)
     {
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "ms-availablenetworks:",
-                UseShellExecute = true
-            });
-            SetText(SettingsStatusText, "Opening available Wi-Fi networks...");
+            Process.Start(new ProcessStartInfo { FileName = uri, UseShellExecute = true });
+            return true;
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "ms-settings:network-wifi",
-                    UseShellExecute = true
-                });
-                SetText(SettingsStatusText, "Opening Wi-Fi settings...");
-            }
-            catch (Exception fallbackException) when (fallbackException is InvalidOperationException or System.ComponentModel.Win32Exception)
-            {
-                SetText(SettingsStatusText, $"Unable to open Wi-Fi discovery: {fallbackException.Message}");
-            }
+            SetText(RadioSubtitleText, $"Couldn't open Windows settings: {exception.Message}");
+            return false;
         }
     }
 
@@ -646,26 +1131,100 @@ public partial class MainWindow : Window
         var capsLock = (GetKeyState(0x14) & 1) == 1;
         if (_lastCapsLock is bool previousCapsLock && previousCapsLock != capsLock)
         {
-            ShowNodeNotification(capsLock ? "Caps Lock On" : "Caps Lock Off");
+            ShowNodeNotification(capsLock ? "Caps Lock On" : "Caps Lock Off", dropIfExpanded: true);
         }
 
         _lastCapsLock = capsLock;
+        CheckBatteryFast();
     }
 
-    private void ShowNodeNotification(string message, TimeSpan? duration = null) =>
-        ShowNodeNotification("ISLA", message, duration);
+    private void ShowNodeNotification(string message, TimeSpan? duration = null, bool dropIfExpanded = false) =>
+        ShowNodeNotification("ISLA", message, duration, dropIfExpanded);
 
-    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null)
+    /// <summary>
+    /// Queues a notification. Nothing is overwritten or lost: they are shown one after another
+    /// (while the island is expanded they wait and play once it closes). Identical pending
+    /// notifications are merged. <paramref name="dropIfExpanded"/> is for things the person can
+    /// already see in the open panel (their own Wi-Fi toggle, Caps Lock...).
+    /// </summary>
+    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null, bool dropIfExpanded = false)
     {
-        if (_isExpanded)
+        if (dropIfExpanded && _isExpanded)
         {
             return;
         }
 
+        foreach (var pending in _notificationQueue)
+        {
+            if (pending.App == appName && pending.Message == message)
+            {
+                return;
+            }
+        }
+
+        while (_notificationQueue.Count >= MaxQueuedNotifications)
+        {
+            _notificationQueue.Dequeue();
+        }
+
+        _notificationQueue.Enqueue(new QueuedNotification(
+            appName, message, duration ?? TimeSpan.FromSeconds(2.4), DateTime.UtcNow));
+
+        if (_nodeNotificationActive)
+        {
+            // Someone is waiting: the current one keeps its minimum time, then makes way.
+            var now = DateTime.UtcNow;
+            var earliest = _nodeNotificationShownUtc + MinNotificationTime;
+            var cutoff = earliest > now ? earliest : now;
+            if (_nodeNotificationUntil > cutoff)
+            {
+                _nodeNotificationUntil = cutoff;
+            }
+
+            return;
+        }
+
+        TryShowNextNotification();
+    }
+
+    private void TryShowNextNotification()
+    {
+        if (_nodeNotificationActive || _isExpanded)
+        {
+            return;
+        }
+
+        while (_notificationQueue.Count > 0)
+        {
+            var next = _notificationQueue.Dequeue();
+            if (DateTime.UtcNow - next.QueuedUtc > NotificationMaxAge)
+            {
+                continue;
+            }
+
+            DisplayNotification(next);
+            return;
+        }
+    }
+
+    private async Task PumpNotificationsAfterCollapseAsync(int version)
+    {
+        await Task.Delay(450);
+        if (version == _expandVersion && !_isExpanded)
+        {
+            TryShowNextNotification();
+        }
+    }
+
+    private void DisplayNotification(QueuedNotification notification)
+    {
         ExitIdleNotch(animate: false);
         _lastInteractionUtc = DateTime.UtcNow;
-        NodeNotificationAppText.Text = appName;
-        NodeNotificationText.Text = message;
+        _nodeNotificationActive = true;
+        _nodeNotificationShownUtc = DateTime.UtcNow;
+        NodeNotificationAppText.Text = notification.App;
+        NodeNotificationText.Text = notification.Message;
+        NodeNotificationText.Visibility = string.IsNullOrEmpty(notification.Message) ? Visibility.Collapsed : Visibility.Visible;
         IslandSurface.Padding = new Thickness(NotificationHorizontalPadding, 0, NotificationHorizontalPadding, 0);
         CompactContent.Width = NotificationWidth - (NotificationHorizontalPadding * 2);
         CompactContent.Visibility = Visibility.Visible;
@@ -673,7 +1232,7 @@ public partial class MainWindow : Window
         NodeNotificationContent.Opacity = 0;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
         ClockText.Visibility = Visibility.Collapsed;
-        _nodeNotificationUntil = DateTime.UtcNow.Add(duration ?? TimeSpan.FromSeconds(2.4));
+        _nodeNotificationUntil = DateTime.UtcNow.Add(notification.Duration);
         _nodeNotificationTimer.Start();
 
         var animation = new DoubleAnimation
@@ -696,7 +1255,7 @@ public partial class MainWindow : Window
         };
         heightAnimation.Completed += (_, _) => IslandSurface.Height = 58;
         IslandSurface.BeginAnimation(FrameworkElement.HeightProperty, heightAnimation, HandoffBehavior.SnapshotAndReplace);
-        NodeNotificationContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120)));
+        NodeNotificationContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140)));
     }
 
     private void NodeNotificationTimer_Tick(object? sender, EventArgs e)
@@ -706,7 +1265,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        // More waiting? Swap straight to the next one: the island stays open, no collapse in between.
+        if (_notificationQueue.Count > 0 && !_isExpanded)
+        {
+            _nodeNotificationActive = false;
+            TryShowNextNotification();
+            if (_nodeNotificationActive)
+            {
+                return;
+            }
+        }
+
+        EndActiveNotification(restoreSize: !_isExpanded);
+    }
+
+    private void EndActiveNotification(bool restoreSize)
+    {
         _nodeNotificationTimer.Stop();
+        _nodeNotificationActive = false;
         NodeNotificationContent.BeginAnimation(OpacityProperty, null);
         NodeNotificationContent.Visibility = Visibility.Collapsed;
         IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
@@ -714,6 +1290,12 @@ public partial class MainWindow : Window
         CompactBatteryContent.Visibility = Visibility.Visible;
         ClockText.Visibility = Visibility.Visible;
         _lastInteractionUtc = DateTime.UtcNow;
+
+        if (!restoreSize)
+        {
+            // The island is open: it manages its own size.
+            return;
+        }
 
         var animation = new DoubleAnimation
         {
@@ -760,6 +1342,7 @@ public partial class MainWindow : Window
     {
         if (_refreshingMedia)
         {
+            _mediaRefreshPending = true;
             return;
         }
 
@@ -794,6 +1377,7 @@ public partial class MainWindow : Window
             SetPlayingIcon(state.PlaybackStatus == "Playing");
             SetSpectrumActive(state.PlaybackStatus == "Playing");
             AnnounceTrackChange(state);
+            UpdateCoverFor(state);
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or InvalidOperationException)
         {
@@ -803,6 +1387,12 @@ public partial class MainWindow : Window
         {
             _refreshingMedia = false;
         }
+
+        if (_mediaRefreshPending)
+        {
+            _mediaRefreshPending = false;
+            await RefreshMediaAsync();
+        }
     }
 
     /// <summary>
@@ -811,7 +1401,8 @@ public partial class MainWindow : Window
     /// </summary>
     private void AnnounceTrackChange(ISLA.Media.MediaState state)
     {
-        if (string.IsNullOrWhiteSpace(state.Title))
+        // MediaService never returns an empty title: "None" means there is no session at all.
+        if (state.PlaybackStatus == "None" || string.IsNullOrWhiteSpace(state.Title))
         {
             return;
         }
@@ -835,7 +1426,7 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// While media is playing, the battery percentage on the right is swapped for a small
-    /// animated spectrum. Animations only run while it is visible.
+    /// animated spectrum. In the idle notch the spectrum sits to the right of the clock.
     /// </summary>
     private void SetSpectrumActive(bool active)
     {
@@ -847,17 +1438,32 @@ public partial class MainWindow : Window
         _spectrumActive = active;
         CompactBatteryPercentText.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         CompactSpectrum.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        UpdateSpectrumAnimations();
+        if (_isIdleNotch)
+        {
+            RetargetIdleNotch();
+        }
+    }
 
+    /// <summary>Animations only run for the spectrum that is actually on screen.</summary>
+    private void UpdateSpectrumAnimations()
+    {
+        AnimateSpectrum(CompactSpectrum, _spectrumActive && !_isIdleNotch);
+        AnimateSpectrum(IdleSpectrum, _spectrumActive && _isIdleNotch);
+    }
+
+    private static void AnimateSpectrum(StackPanel panel, bool run)
+    {
         double[] seconds = [0.46, 0.62, 0.38, 0.56, 0.50];
         double[] lows = [0.25, 0.20, 0.30, 0.22, 0.28];
-        for (var i = 0; i < CompactSpectrum.Children.Count; i++)
+        for (var i = 0; i < panel.Children.Count; i++)
         {
-            if (CompactSpectrum.Children[i].RenderTransform is not ScaleTransform scale)
+            if (panel.Children[i].RenderTransform is not ScaleTransform scale)
             {
                 continue;
             }
 
-            if (active)
+            if (run)
             {
                 scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation
                 {
@@ -949,8 +1555,182 @@ public partial class MainWindow : Window
         return position;
     }
 
+    // =================================================================================
+    //  Media: event-driven refresh, seeking, album art
+    // =================================================================================
+
+    private async Task StartMediaWatcherAsync()
+    {
+        try
+        {
+            _mediaWatcher.Changed += MediaWatcher_Changed;
+            await _mediaWatcher.StartAsync();
+        }
+        catch (Exception exception)
+        {
+            // Without the watcher everything still works through the 2 s poll.
+            Debug.WriteLine($"Media watcher unavailable: {exception}");
+        }
+    }
+
+    private void MediaWatcher_Changed(object? sender, EventArgs e)
+    {
+        // Raised on a background thread, and usually several times in a burst: debounce on the UI thread.
+        Dispatcher.BeginInvoke(() =>
+        {
+            _mediaDebounceTimer.Stop();
+            _mediaDebounceTimer.Start();
+        });
+    }
+
+    private async void MediaDebounceTimer_Tick(object? sender, EventArgs e)
+    {
+        _mediaDebounceTimer.Stop();
+        await RefreshMediaAsync();
+    }
+
+    private double GetSeekRatio(System.Windows.Input.MouseEventArgs e)
+    {
+        var width = MediaSeekArea.ActualWidth;
+        return width <= 0 ? 0 : Math.Clamp(e.GetPosition(MediaSeekArea).X / width, 0, 1);
+    }
+
+    private void AnimateSeekBar(double height) =>
+        MediaProgress.BeginAnimation(HeightProperty,
+            new DoubleAnimation(height, TimeSpan.FromMilliseconds(120)) { EasingFunction = FadeEase });
+
+    private void MediaSeek_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) => AnimateSeekBar(6);
+
+    private void MediaSeek_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (!_seeking)
+        {
+            AnimateSeekBar(4);
+        }
+    }
+
+    private void MediaSeek_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_lastMediaState is not { } state || state.Duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _seeking = true;
+        MediaSeekArea.CaptureMouse();
+        UpdateSeekPreview(GetSeekRatio(e), state);
+        e.Handled = true;
+    }
+
+    private void MediaSeek_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_seeking && _lastMediaState is { } state)
+        {
+            UpdateSeekPreview(GetSeekRatio(e), state);
+        }
+    }
+
+    private void UpdateSeekPreview(double ratio, ISLA.Media.MediaState state)
+    {
+        _seekRatio = ratio;
+        SetMediaProgress(ratio);
+        SetText(MediaPositionText, FormatTime(TimeSpan.FromSeconds(ratio * state.Duration.TotalSeconds)));
+    }
+
+    private async void MediaSeek_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_seeking)
+        {
+            return;
+        }
+
+        _seeking = false;
+        MediaSeekArea.ReleaseMouseCapture();
+        if (!MediaSeekArea.IsMouseOver)
+        {
+            AnimateSeekBar(4);
+        }
+
+        if (_lastMediaState is not { } state || state.Duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var target = TimeSpan.FromSeconds(_seekRatio * state.Duration.TotalSeconds);
+        var accepted = await _mediaWatcher.SeekAsync(target);
+        if (!accepted)
+        {
+            SetText(MediaStatusText, "This player doesn't support seeking");
+            UpdateMediaProgressDisplay(state);
+            return;
+        }
+
+        // Move the local clock right away; the next poll just confirms it.
+        _mediaAnchorPosition = target;
+        _mediaAnchorUtc = DateTime.UtcNow;
+        UpdateMediaProgressDisplay(state);
+    }
+
+    private void UpdateCoverFor(ISLA.Media.MediaState state)
+    {
+        var key = state.PlaybackStatus == "None" ? string.Empty : $"{state.Title}|{state.Artist}|{state.Album}";
+        if (!string.Equals(key, _coverKey, StringComparison.Ordinal))
+        {
+            _coverKey = key;
+            _coverAttempts = 0;
+            _coverLoaded = false;
+            MediaCoverImage.Source = null;
+        }
+
+        if (_coverLoaded || _coverLoading || _coverAttempts >= 4 || key.Length == 0)
+        {
+            return;
+        }
+
+        _ = LoadCoverAsync(key);
+    }
+
+    private async Task LoadCoverAsync(string key)
+    {
+        _coverLoading = true;
+        _coverAttempts++;
+        try
+        {
+            // Players often publish the artwork a moment after the title: a few retries cover that.
+            var bytes = await _mediaWatcher.GetThumbnailAsync();
+            if (bytes is null || !string.Equals(key, _coverKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            using var stream = new MemoryStream(bytes);
+            var image = new System.Windows.Media.Imaging.BitmapImage();
+            image.BeginInit();
+            image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            image.DecodePixelWidth = 160;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            MediaCoverImage.Source = image;
+            _coverLoaded = true;
+        }
+        catch (Exception exception) when (exception is NotSupportedException or InvalidOperationException or IOException or ArgumentException)
+        {
+            _coverAttempts = 4; // undecodable artwork: stop retrying for this track
+        }
+        finally
+        {
+            _coverLoading = false;
+        }
+    }
+
     private void UpdateMediaProgressDisplay(ISLA.Media.MediaState state)
     {
+        if (_seeking)
+        {
+            return;
+        }
+
         var position = GetEstimatedMediaPosition(state);
         var progress = state.Duration > TimeSpan.Zero
             ? Math.Clamp(position.TotalSeconds / state.Duration.TotalSeconds, 0, 1)
@@ -1067,19 +1847,21 @@ public partial class MainWindow : Window
     private void EnterIdleNotch()
     {
         _isIdleNotch = true;
+        _idleNotchWidth = GetIdleNotchWidth();
         CompactBatteryContent.Visibility = Visibility.Collapsed;
         // Hidden until the notch has reached its final size (shown in the Completed handler below).
         IdleBatteryEdge.Visibility = Visibility.Collapsed;
         IdleBatteryTrack.Visibility = Visibility.Collapsed;
         CompactChargingIcon.Visibility = Visibility.Collapsed;
-        CompactContent.Width = IdleNotchWidth;
+        CompactContent.Width = _idleNotchWidth;
+        ApplyIdleClockLayout();
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 10;
         // A notch is flush with the top edge: no horizontal inset and no rounded top corners.
         IslandSurface.Padding = new Thickness(0);
         AnimateWindowTop(SystemParameters.WorkArea.Top, TimeSpan.FromMilliseconds(320), CollapseEase);
         IslandSurface.BeginAnimation(WidthProperty,
-            MakeAnimation(IdleNotchWidth, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
+            MakeAnimation(_idleNotchWidth, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
         IslandSurface.BeginAnimation(HeightProperty,
             MakeAnimation(IdleNotchHeight, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
         var notchRadiusAnimation = MakeAnimation(IdleNotchRadius, TimeSpan.FromMilliseconds(320), CollapseEase);
@@ -1095,6 +1877,51 @@ public partial class MainWindow : Window
         };
         BeginAnimation(IslandRadiusProperty, notchRadiusAnimation, HandoffBehavior.SnapshotAndReplace);
         Fade(ClockText, 0, 90, 0, FadeEase, () => Fade(ClockText, 1, 150, 30, FadeEase));
+        UpdateSpectrumAnimations();
+    }
+
+    private double GetIdleNotchWidth() => _spectrumActive ? IdleMusicNotchWidth : IdleNotchWidth;
+
+    /// <summary>
+    /// Idle notch layout: centred clock normally; while media plays the clock moves to the
+    /// left edge and the spectrum takes the right side.
+    /// </summary>
+    private void ApplyIdleClockLayout()
+    {
+        var music = _isIdleNotch && _spectrumActive;
+        ClockText.HorizontalAlignment = music ? System.Windows.HorizontalAlignment.Left : System.Windows.HorizontalAlignment.Center;
+        ClockText.Margin = music ? new Thickness(12, 0, 0, 0) : new Thickness(0);
+        IdleSpectrum.Visibility = music ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Media started/stopped while the notch is idle: grow or shrink it to fit.</summary>
+    private void RetargetIdleNotch()
+    {
+        var target = GetIdleNotchWidth();
+        if (Math.Abs(target - _idleNotchWidth) < 0.5)
+        {
+            ApplyIdleClockLayout();
+            return;
+        }
+
+        _idleNotchWidth = target;
+        IdleBatteryEdge.Visibility = Visibility.Collapsed;
+        IdleBatteryTrack.Visibility = Visibility.Collapsed;
+        CompactContent.Width = target;
+        ApplyIdleClockLayout();
+        Fade(ClockText, 0, 90, 0, FadeEase, () => Fade(ClockText, 1, 160, 120, FadeEase));
+
+        var animation = MakeAnimation(target, TimeSpan.FromMilliseconds(320), CollapseEase);
+        animation.Completed += (_, _) =>
+        {
+            if (_isIdleNotch && Math.Abs(_idleNotchWidth - target) < 0.5)
+            {
+                SetIdleBatteryEdge(_lastBatteryPercent);
+                IdleBatteryTrack.Visibility = Visibility.Visible;
+                IdleBatteryEdge.Visibility = Visibility.Visible;
+            }
+        };
+        IslandSurface.BeginAnimation(WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
     private void ExitIdleNotch(bool animate = true)
@@ -1105,6 +1932,9 @@ public partial class MainWindow : Window
         }
 
         _isIdleNotch = false;
+        _idleNotchWidth = IdleNotchWidth;
+        ApplyIdleClockLayout();
+        UpdateSpectrumAnimations();
         CompactBatteryContent.Visibility = Visibility.Visible;
         IdleBatteryEdge.Visibility = Visibility.Collapsed;
         IdleBatteryTrack.Visibility = Visibility.Collapsed;
@@ -1187,6 +2017,11 @@ public partial class MainWindow : Window
         if (expanded)
         {
             ExitIdleNotch(animate: false);
+            if (_nodeNotificationActive)
+            {
+                // Opening the island dismisses the banner; whatever is still queued waits for the close.
+                EndActiveNotification(restoreSize: false);
+            }
         }
 
         _isExpanded = expanded;
@@ -1226,6 +2061,10 @@ public partial class MainWindow : Window
 
             Fade(ExpandedContent, 1, 220, 100, FadeEase);
             Slide(ExpandedTranslate, 0, 420, 40, ContentEase);
+            if (_activeTab == "Settings")
+            {
+                RefreshSettingsIfStale();
+            }
         }
         else
         {
@@ -1234,10 +2073,12 @@ public partial class MainWindow : Window
                 if (version == _expandVersion)
                 {
                     ExpandedContent.Visibility = Visibility.Collapsed;
+                    ResetRadioView();
                 }
             });
             Fade(CompactContent, 1, 130, 140, FadeEase);
             _lastInteractionUtc = DateTime.UtcNow;
+            _ = PumpNotificationsAfterCollapseAsync(version);
 
         }
     }
@@ -1263,6 +2104,9 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= SystemEvents_PowerModeChanged;
+        _mediaDebounceTimer.Stop();
+        _mediaWatcher.Dispose();
         _mediaRefreshTimer.Stop();
         _mediaProgressTimer.Stop();
         _settingsRefreshTimer.Stop();
@@ -1401,7 +2245,18 @@ public partial class MainWindow : Window
 
         var previous = GetPanel(_activeTab);
         var next = GetPanel(tab);
+        if (_activeTab == "Settings")
+        {
+            // Leaving Settings also leaves the Wi-Fi / Bluetooth detail view.
+            _radioViewOpen = false;
+            _radioLoadVersion++;
+        }
+
         _activeTab = tab;
+        if (tab == "Settings")
+        {
+            RefreshSettingsIfStale();
+        }
         var version = ++_tabVersion;
 
         // Highlight pill slides to the new tab.
@@ -1450,12 +2305,13 @@ public partial class MainWindow : Window
     {
         yield return MediaPanel;
         yield return SettingsPanel;
+        yield return RadioPanel;
         yield return TimerPanel;
     }
 
     private FrameworkElement GetPanel(string tab) => tab switch
     {
-        "Settings" => SettingsPanel,
+        "Settings" => _radioViewOpen ? RadioPanel : SettingsPanel,
         "Timer" => TimerPanel,
         _ => MediaPanel
     };

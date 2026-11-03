@@ -3,19 +3,40 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
+using Microsoft.Win32;
 
 namespace ISLAInstaller;
 
 public partial class MainWindow : Window
 {
+    private const string AppVersion = "1.0.0";
+    private const string Publisher = "ISLA Development";
+    private const string UninstallRegistryKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ISLA";
+
+    // Program Files (all users). The setup runs elevated (see app.manifest), so it can write here.
     private readonly string _installDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Programs", "ISLA");
-    private int _page;
+        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "ISLA");
+
+    // All-users Start Menu: this is what makes ISLA show up in Windows Search / the Start list.
+    private readonly string _shortcutPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu), "Programs", "ISLA.lnk");
+
+    // Where older versions of this installer put things (per-user). Cleaned up automatically.
+    private readonly string _legacyDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "ISLA");
+    private readonly string _legacyShortcut = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "ISLA.lnk");
+
+    private string AppExecutable => Path.Combine(_installDirectory, "ISLA.exe");
+    private string UninstallerPath => Path.Combine(_installDirectory, "ISLA-Uninstall.exe");
+
     private readonly bool _isUninstalling;
-    private bool _uninstallFinished;
+    private bool _started;
+    private bool _finished;
+    private bool _installed;
 
     public MainWindow()
     {
@@ -29,38 +50,49 @@ public partial class MainWindow : Window
             DescriptionText.Text = "Remove ISLA, its Windows notification identity, and its Start Menu shortcut.";
             NextButton.Content = "Uninstall";
         }
+
         StatusText.Text = $"Installation folder: {_installDirectory}";
     }
 
     private void NextButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isUninstalling)
+        if (_finished)
         {
-            if (_uninstallFinished)
+            if (_installed && LaunchCheck.IsChecked == true)
             {
-                Close();
-                return;
+                LaunchApp();
             }
 
-            StartUninstall();
+            Close();
             return;
         }
 
-        if (_page == 0)
+        if (_started)
         {
-            _page = 1;
+            return;
+        }
+
+        _started = true;
+        NextButton.IsEnabled = false;
+        CancelButton.IsEnabled = false;
+        InstallProgress.Visibility = Visibility.Visible;
+        if (_isUninstalling)
+        {
+            TitleText.Text = "Removing ISLA";
+            DescriptionText.Text = "Please wait while ISLA is removed.";
+            UninstallAsync();
+        }
+        else
+        {
             TitleText.Text = "Installing ISLA";
             DescriptionText.Text = "Please wait while ISLA is installed.";
-            NextButton.IsEnabled = false;
-            BackButton.IsEnabled = false;
-            CancelButton.IsEnabled = false;
-            InstallProgress.Visibility = Visibility.Visible;
             InstallAsync();
-            return;
         }
-
-        Close();
     }
+
+    // ---------------------------------------------------------------------------------
+    //  Install
+    // ---------------------------------------------------------------------------------
 
     private async void InstallAsync()
     {
@@ -68,7 +100,10 @@ public partial class MainWindow : Window
         {
             await Task.Run(() =>
             {
+                StopRunningApp();
                 UnregisterIdentityPackage();
+                RemoveLegacyInstall();
+
                 if (Directory.Exists(_installDirectory))
                 {
                     Directory.Delete(_installDirectory, true);
@@ -83,22 +118,24 @@ public partial class MainWindow : Window
                         ?? throw new InvalidOperationException("The installer payload is missing.");
                 using var archive = new ZipArchive(payload, ZipArchiveMode.Read);
                 archive.ExtractToDirectory(_installDirectory, true);
+
                 RegisterIdentityPackage();
-                CreateShortcut(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "ISLA.lnk"));
-                var uninstaller = Path.Combine(_installDirectory, "ISLA-Uninstall.exe");
+                CreateShortcut(_shortcutPath);
                 File.Copy(Environment.ProcessPath
-                    ?? throw new InvalidOperationException("Could not locate the setup executable."), uninstaller, true);
+                    ?? throw new InvalidOperationException("Could not locate the setup executable."),
+                    UninstallerPath, true);
+                WriteUninstallRegistration();
             });
 
             TitleText.Text = "ISLA installed";
             DescriptionText.Text = "ISLA 1.0 was installed successfully.";
-            StatusText.Text = "Start ISLA from the Start Menu. An uninstaller is available in the installation folder.";
+            StatusText.Text = "Find ISLA in the Start Menu or Windows Search. It is also listed under Settings > Apps.";
             InstallProgress.Visibility = Visibility.Collapsed;
+            LaunchCheck.Visibility = Visibility.Visible;
             NextButton.Content = "Finish";
             NextButton.IsEnabled = true;
-            CancelButton.IsEnabled = true;
-            _uninstallFinished = true;
+            _installed = true;
+            _finished = true;
         }
         catch (Exception exception)
         {
@@ -107,16 +144,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private void StartUninstall()
-    {
-        TitleText.Text = "Removing ISLA";
-        DescriptionText.Text = "Please wait while ISLA is removed.";
-        NextButton.IsEnabled = false;
-        BackButton.IsEnabled = false;
-        CancelButton.IsEnabled = false;
-        InstallProgress.Visibility = Visibility.Visible;
-        UninstallAsync();
-    }
+    // ---------------------------------------------------------------------------------
+    //  Uninstall
+    // ---------------------------------------------------------------------------------
 
     private async void UninstallAsync()
     {
@@ -124,15 +154,13 @@ public partial class MainWindow : Window
         {
             await Task.Run(() =>
             {
+                StopRunningApp();
                 UnregisterIdentityPackage();
-                var shortcut = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs", "ISLA.lnk");
-                if (File.Exists(shortcut))
-                {
-                    File.Delete(shortcut);
-                }
-
-                ScheduleInstallDirectoryRemoval();
+                DeleteFileQuietly(_shortcutPath);
+                DeleteFileQuietly(_legacyShortcut);
+                Registry.LocalMachine.DeleteSubKeyTree(UninstallRegistryKey, false);
+                ScheduleDirectoryRemoval(_installDirectory);
+                ScheduleDirectoryRemoval(_legacyDirectory);
             });
 
             TitleText.Text = "ISLA removed";
@@ -141,7 +169,7 @@ public partial class MainWindow : Window
             InstallProgress.Visibility = Visibility.Collapsed;
             NextButton.Content = "Finish";
             NextButton.IsEnabled = true;
-            CancelButton.IsEnabled = true;
+            _finished = true;
         }
         catch (Exception exception)
         {
@@ -150,16 +178,31 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ScheduleInstallDirectoryRemoval()
+    /// <summary>
+    /// The uninstaller runs from inside the folder it removes, so a small script keeps retrying
+    /// until the setup process has exited and the folder can really be deleted.
+    /// </summary>
+    private static void ScheduleDirectoryRemoval(string directory)
     {
-        if (!Directory.Exists(_installDirectory))
+        if (!Directory.Exists(directory))
         {
             return;
         }
 
         var script = Path.Combine(Path.GetTempPath(), $"ISLA-Uninstall-{Guid.NewGuid():N}.cmd");
-        var escapedDirectory = _installDirectory.Replace("\"", "\"\"");
-        File.WriteAllText(script, $"@echo off\r\ntimeout /t 2 /nobreak > nul\r\nrmdir /s /q \"{escapedDirectory}\"\r\ndel \"%~f0\"\r\n");
+        var escaped = directory.Replace("\"", "\"\"");
+        var lines = new[]
+        {
+            "@echo off",
+            "for /l %%i in (1,1,60) do (",
+            $"  rmdir /s /q \"{escaped}\" 2>nul",
+            $"  if not exist \"{escaped}\" goto done",
+            "  timeout /t 1 /nobreak >nul",
+            ")",
+            ":done",
+            "del \"%~f0\""
+        };
+        File.WriteAllText(script, string.Join("\r\n", lines) + "\r\n");
         Process.Start(new ProcessStartInfo
         {
             FileName = "cmd.exe",
@@ -167,6 +210,135 @@ public partial class MainWindow : Window
             CreateNoWindow = true,
             UseShellExecute = false
         });
+    }
+
+    // ---------------------------------------------------------------------------------
+    //  Helpers
+    // ---------------------------------------------------------------------------------
+
+    private static void StopRunningApp()
+    {
+        foreach (var process in Process.GetProcessesByName("ISLA"))
+        {
+            try
+            {
+                process.Kill(true);
+                process.WaitForExit(5000);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                // Already gone or not ours to stop: the file copy below will report a real problem.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    private void RemoveLegacyInstall()
+    {
+        DeleteFileQuietly(_legacyShortcut);
+        try
+        {
+            if (Directory.Exists(_legacyDirectory))
+            {
+                Directory.Delete(_legacyDirectory, true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Old per-user copy is locked: harmless, the new install does not depend on it.
+        }
+    }
+
+    private static void DeleteFileQuietly(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>Adds ISLA to Settings > Apps (with icon, version, publisher and an Uninstall button).</summary>
+    private void WriteUninstallRegistration()
+    {
+        long bytes = 0;
+        foreach (var file in new DirectoryInfo(_installDirectory).EnumerateFiles("*", SearchOption.AllDirectories))
+        {
+            bytes += file.Length;
+        }
+
+        using var key = Registry.LocalMachine.CreateSubKey(UninstallRegistryKey, true)
+            ?? throw new InvalidOperationException("Could not register ISLA in Windows Apps.");
+        key.SetValue("DisplayName", "ISLA");
+        key.SetValue("DisplayVersion", AppVersion);
+        key.SetValue("Publisher", Publisher);
+        key.SetValue("InstallLocation", _installDirectory);
+        key.SetValue("InstallDate", DateTime.Now.ToString("yyyyMMdd"));
+        key.SetValue("DisplayIcon", $"\"{AppExecutable}\",0");
+        key.SetValue("UninstallString", $"\"{UninstallerPath}\" --uninstall");
+        key.SetValue("EstimatedSize", (int)Math.Min(int.MaxValue, bytes / 1024), RegistryValueKind.DWord);
+        key.SetValue("NoModify", 1, RegistryValueKind.DWord);
+        key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
+    }
+
+    /// <summary>Starts ISLA through Explorer so it runs as the normal user, not elevated like this setup.</summary>
+    private void LaunchApp()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{AppExecutable}\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            MessageBox.Show($"ISLA was installed but could not be started: {exception.Message}",
+                "ISLA Setup", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void CreateShortcut(string shortcutPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(shortcutPath)!);
+        var shellType = Type.GetTypeFromProgID("WScript.Shell")
+            ?? throw new InvalidOperationException("Windows Script Host is unavailable, so the Start Menu shortcut could not be created.");
+        dynamic shell = Activator.CreateInstance(shellType)!;
+        try
+        {
+            dynamic link = shell.CreateShortcut(shortcutPath);
+            try
+            {
+                link.TargetPath = AppExecutable;
+                link.WorkingDirectory = _installDirectory;
+                link.Description = "ISLA Dynamic Island";
+                link.IconLocation = AppExecutable + ",0";
+                link.Save();
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(link);
+            }
+        }
+        finally
+        {
+            Marshal.FinalReleaseComObject(shell);
+        }
+
+        if (!File.Exists(shortcutPath))
+        {
+            throw new InvalidOperationException("The Start Menu shortcut could not be created.");
+        }
     }
 
     private void RegisterIdentityPackage()
@@ -231,26 +403,5 @@ public partial class MainWindow : Window
         resource.CopyTo(output);
     }
 
-    private void CreateShortcut(string shortcutPath)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(shortcutPath)!);
-        var target = Path.Combine(_installDirectory, "ISLA.exe").Replace("'", "''");
-        var link = shortcutPath.Replace("'", "''");
-        var command = "$s=New-Object -ComObject WScript.Shell;" +
-            "$l=$s.CreateShortcut('" + link + "');" +
-            "$l.TargetPath='" + target + "';" +
-            "$l.WorkingDirectory='" + _installDirectory.Replace("'", "''") + "';" +
-            "$l.Description='ISLA Dynamic Island';$l.Save()";
-        using var process = Process.Start(new ProcessStartInfo
-        {
-            FileName = "powershell.exe",
-            Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{command}\"",
-            CreateNoWindow = true,
-            UseShellExecute = false
-        });
-        process?.WaitForExit();
-    }
-
-    private void BackButton_Click(object sender, RoutedEventArgs e) => _page = 0;
     private void CancelButton_Click(object sender, RoutedEventArgs e) => Close();
 }

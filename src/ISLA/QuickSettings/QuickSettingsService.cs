@@ -3,6 +3,7 @@ using System.Management;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Windows.Devices.Radios;
+using Windows.Networking.Connectivity;
 
 namespace ISLA.QuickSettings;
 
@@ -175,8 +176,45 @@ public sealed class QuickSettingsService
         }
     }
 
+    /// <summary>
+    /// Fast path: asks Windows for the connected WLAN profile (no process spawn, ~instant).
+    /// Returns null when it can't tell, in which case the netsh fallback is used.
+    /// </summary>
+    private static string? GetConnectedSsidFromProfiles()
+    {
+        try
+        {
+            foreach (var profile in NetworkInformation.GetConnectionProfiles())
+            {
+                if (!profile.IsWlanConnectionProfile ||
+                    profile.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.None)
+                {
+                    continue;
+                }
+
+                var ssid = profile.WlanConnectionProfileDetails?.GetConnectedSsid();
+                if (!string.IsNullOrWhiteSpace(ssid))
+                {
+                    return ssid;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            // fall through to netsh
+        }
+
+        return null;
+    }
+
     private static async Task<string?> GetConnectedWifiNameAsync()
     {
+        var fastName = GetConnectedSsidFromProfiles();
+        if (!string.IsNullOrWhiteSpace(fastName))
+        {
+            return fastName;
+        }
+
         try
         {
             using var process = Process.Start(new ProcessStartInfo

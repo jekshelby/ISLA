@@ -15,6 +15,10 @@ $setup = Join-Path $release 'ISLA-Setup.exe'
 New-Item $release -ItemType Directory -Force | Out-Null
 Remove-Item $identityDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $identityDirectory -ItemType Directory -Force | Out-Null
+# Logo used by Windows for the notification identity (toast app icon). Without it the icon is blank.
+$identityAssets = Join-Path $identityDirectory 'Assets'
+New-Item $identityAssets -ItemType Directory -Force | Out-Null
+Copy-Item (Join-Path $installer 'Assets\ISLA.png') (Join-Path $identityAssets 'ISLA.png') -Force
 Remove-Item $payload, $identityPackage, $identityCertificate, $setup -Force -ErrorAction SilentlyContinue
 dotnet publish $project -c Release -r win-x64 --self-contained false
 if ($LASTEXITCODE -ne 0) { throw 'ISLA publish failed.' }

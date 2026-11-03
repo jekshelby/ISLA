@@ -95,6 +95,21 @@
                                Style="{StaticResource ClockStyle}"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center" />
+                    <!-- Idle-notch spectrum (right of the clock while media is playing) -->
+                    <StackPanel x:Name="IdleSpectrum"
+                                Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Height="9"
+                                Margin="0,0,12,0"
+                                Visibility="Collapsed"
+                                IsHitTestVisible="False">
+                        <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4" /></Rectangle.RenderTransform></Rectangle>
+                        <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7" /></Rectangle.RenderTransform></Rectangle>
+                        <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="1" /></Rectangle.RenderTransform></Rectangle>
+                        <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7" /></Rectangle.RenderTransform></Rectangle>
+                        <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4" /></Rectangle.RenderTransform></Rectangle>
+                    </StackPanel>
                     <Grid x:Name="NodeNotificationContent"
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
@@ -183,25 +198,72 @@
                                            Margin="12,0,0,0" />
                             </Grid>
 
-                            <TextBlock x:Name="MediaTitleText"
-                                       Text="No active media session"
-                                       Style="{StaticResource ContentTitleStyle}"
-                                       TextTrimming="CharacterEllipsis"
-                                       Margin="0,8,0,0" />
-                            <TextBlock x:Name="MediaArtistText"
-                                       Text="Play media in Spotify or a supported browser"
-                                       Style="{StaticResource ContentSubtitleStyle}"
-                                       TextTrimming="CharacterEllipsis"
-                                       Margin="0,3,0,0" />
-                            <TextBlock x:Name="MediaAlbumText"
-                                       Style="{StaticResource MetadataStyle}"
-                                       TextTrimming="CharacterEllipsis"
-                                       Margin="0,2,0,0" />
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
 
-                            <ProgressBar x:Name="MediaProgress"
-                                         Height="4"
-                                         Minimum="0" Maximum="1"
-                                         Margin="0,12,0,6" />
+                                <!-- Album art (placeholder note icon until a cover is available) -->
+                                <Border Width="62" Height="62"
+                                        CornerRadius="12"
+                                        Background="{StaticResource IslandCard}"
+                                        BorderBrush="{StaticResource IslandBorder}"
+                                        BorderThickness="1"
+                                        Margin="0,0,12,0"
+                                        VerticalAlignment="Center">
+                                    <Grid>
+                                        <Path Data="M 7,15.5 L 7,4 L 15,2.5 L 15,14 M 7,15.5 A 2.5,2.5 0 1 1 2,15.5 A 2.5,2.5 0 1 1 7,15.5 M 15,14 A 2.5,2.5 0 1 1 10,14 A 2.5,2.5 0 1 1 15,14"
+                                              Stroke="{StaticResource IslandMutedText}"
+                                              StrokeThickness="1.4"
+                                              StrokeLineJoin="Round"
+                                              Width="22" Height="22" Stretch="Uniform"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        <Image x:Name="MediaCoverImage"
+                                               Width="60" Height="60"
+                                               Stretch="UniformToFill"
+                                               RenderOptions.BitmapScalingMode="HighQuality">
+                                            <Image.Clip>
+                                                <RectangleGeometry Rect="0,0,60,60" RadiusX="11" RadiusY="11" />
+                                            </Image.Clip>
+                                        </Image>
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock x:Name="MediaTitleText"
+                                               Text="No active media session"
+                                               Style="{StaticResource ContentTitleStyle}"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <TextBlock x:Name="MediaArtistText"
+                                               Text="Play media in Spotify or a supported browser"
+                                               Style="{StaticResource ContentSubtitleStyle}"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,2,0,0" />
+                                    <TextBlock x:Name="MediaAlbumText"
+                                               Style="{StaticResource MetadataStyle}"
+                                               TextTrimming="CharacterEllipsis"
+                                               Margin="0,1,0,0" />
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Click or drag to seek -->
+                            <Grid x:Name="MediaSeekArea"
+                                  Height="16"
+                                  Margin="0,6,0,0"
+                                  Background="Transparent"
+                                  Cursor="Hand"
+                                  MouseEnter="MediaSeek_MouseEnter"
+                                  MouseLeave="MediaSeek_MouseLeave"
+                                  MouseLeftButtonDown="MediaSeek_MouseDown"
+                                  MouseMove="MediaSeek_MouseMove"
+                                  MouseLeftButtonUp="MediaSeek_MouseUp">
+                                <ProgressBar x:Name="MediaProgress"
+                                             Height="4"
+                                             Minimum="0" Maximum="1"
+                                             VerticalAlignment="Center"
+                                             IsHitTestVisible="False" />
+                            </Grid>
 
                             <DockPanel LastChildFill="False">
                                 <TextBlock x:Name="MediaPositionText" DockPanel.Dock="Left"
@@ -332,7 +394,8 @@
                                                        FontSize="12"
                                                        VerticalAlignment="Center"
                                                        Margin="0,0,8,0" />
-                                            <Path HorizontalAlignment="Right"
+                                            <Path x:Name="BatteryCardIcon"
+                                                  HorizontalAlignment="Right"
                                                   Grid.Column="2"
                                                   Data="M 3.5,3.5 L 13,3.5 A 1.5,1.5 0 0 1 14.5,5 L 14.5,11 A 1.5,1.5 0 0 1 13,12.5 L 3.5,12.5 A 1.5,1.5 0 0 1 2,11 L 2,5 A 1.5,1.5 0 0 1 3.5,3.5 Z M 16.5,7 L 16.5,9"
                                                   Stroke="{StaticResource IslandAccent}"
@@ -415,6 +478,60 @@
                             <TextBlock x:Name="SettingsStatusText"
                                        Style="{StaticResource StatusTextStyle}"
                                        Margin="2,6,0,0" />
+                        </StackPanel>
+
+                        <!-- ===== WI-FI / BLUETOOTH DETAIL PANEL ===== -->
+                        <StackPanel x:Name="RadioPanel" Visibility="Collapsed">
+                            <Grid Height="30">
+                                <Button HorizontalAlignment="Left"
+                                        VerticalAlignment="Center"
+                                        ToolTip="Back"
+                                        Click="RadioBack_Click"
+                                        Style="{StaticResource GhostIconButtonStyle}">
+                                    <Path Data="M 7,1 L 2,6 L 7,11 M 2,6 L 12,6"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ButtonBase}}"
+                                          StrokeThickness="1.5"
+                                          StrokeStartLineCap="Round"
+                                          StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Width="12" Height="12" Stretch="Uniform" />
+                                </Button>
+                                <TextBlock x:Name="RadioTitleText"
+                                           Text="Wi-Fi"
+                                           Style="{StaticResource ContentTitleStyle}"
+                                           FontSize="16"
+                                           VerticalAlignment="Center"
+                                           Margin="34,0,0,0" />
+                                <ToggleButton x:Name="RadioSwitch"
+                                              Style="{StaticResource IslandSwitchStyle}"
+                                              HorizontalAlignment="Right"
+                                              VerticalAlignment="Center"
+                                              Click="RadioSwitch_Click" />
+                            </Grid>
+                            <TextBlock x:Name="RadioSubtitleText"
+                                       Style="{StaticResource MetadataStyle}"
+                                       FontSize="11"
+                                       TextTrimming="CharacterEllipsis"
+                                       Margin="2,2,0,6" />
+                            <Border Style="{StaticResource SettingsCardStyle}" Margin="0" Padding="4">
+                                <ScrollViewer Height="100"
+                                              VerticalScrollBarVisibility="Hidden"
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              Focusable="False">
+                                    <StackPanel x:Name="RadioList" />
+                                </ScrollViewer>
+                            </Border>
+                            <Button Click="RadioSettingsLink_Click"
+                                    Style="{StaticResource RadioRowButtonStyle}"
+                                    Height="22"
+                                    Margin="0,4,0,0"
+                                    HorizontalAlignment="Right">
+                                <TextBlock x:Name="RadioSettingsLinkText"
+                                           Text="Network settings"
+                                           Style="{StaticResource MetadataStyle}"
+                                           Foreground="{StaticResource IslandAccent}"
+                                           FontSize="11" />
+                            </Button>
                         </StackPanel>
 
                         <!-- ===== TIMER PANEL ===== -->
