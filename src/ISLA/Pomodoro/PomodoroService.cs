@@ -29,6 +29,11 @@ public sealed class PomodoroState
 
 public sealed class PomodoroService
 {
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        WriteIndented = true
+    };
+
     private readonly string _statePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "ISLA",
@@ -203,10 +208,7 @@ public sealed class PomodoroService
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
-            File.WriteAllText(_statePath, JsonSerializer.Serialize(State, new JsonSerializerOptions
-            {
-                WriteIndented = true
-            }));
+            File.WriteAllText(_statePath, JsonSerializer.Serialize(State, SerializerOptions));
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

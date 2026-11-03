@@ -28,7 +28,7 @@
     <Grid>
         <Border x:Name="IslandSurface"
                 Width="180"
-                Height="34"
+                Height="30"
                 HorizontalAlignment="Center"
                 VerticalAlignment="Top"
                 Background="{StaticResource IslandBackground}"
@@ -140,7 +140,7 @@
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Center"
-                          Width="300">
+                          Width="298">
                         <StackPanel HorizontalAlignment="Stretch">
                             <TextBlock x:Name="NodeNotificationAppText"
                                        Style="{StaticResource ContentSubtitleStyle}"

@@ -10,9 +10,11 @@ public sealed class WindowsNotificationService : IDisposable
     private readonly UserNotificationListener _listener = UserNotificationListener.Current;
     private readonly HashSet<uint> _seenIds = [];          // hanya diakses di dalam _pollGate
     private readonly SemaphoreSlim _pollGate = new(1, 1);
+    private readonly object _lifecycleLock = new();
     private CancellationTokenSource? _cts;
     private int _pollRequested;
-    private bool _started;
+    private int _started;
+    private int _disposed;
 
     public event EventHandler<WindowsNotification>? NotificationReceived;
     public event EventHandler<Exception>? Error;
@@ -20,6 +22,11 @@ public sealed class WindowsNotificationService : IDisposable
 
     public async Task StartAsync()
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(WindowsNotificationService));
+        }
+
         var access = AccessStatus;
         if (access == UserNotificationListenerAccessStatus.Unspecified)
         {
@@ -32,12 +39,15 @@ public sealed class WindowsNotificationService : IDisposable
                 $"Windows notification access was not granted ({access}). Enable notification access for ISLA in Windows Settings.");
         }
 
-        if (_started)
+        if (Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
 
-        _started = true;
+        if (Interlocked.Exchange(ref _started, 1) == 1)
+        {
+            return;
+        }
 
         // Tandai notifikasi yang sudah ada sebagai "sudah dilihat"
         await _pollGate.WaitAsync();
@@ -68,42 +78,72 @@ public sealed class WindowsNotificationService : IDisposable
             Error?.Invoke(this, ex);
         }
 
-        // Polling utama, tidak bergantung pada event
-        _cts = new CancellationTokenSource();
-        _ = RunPollLoopAsync(_cts.Token);
+        // Satu-satunya polling: loop internal ini menggantikan timer di MainWindow.
+        lock (_lifecycleLock)
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            _cts = cts;
+            _ = RunPollLoopAsync(cts);
+        }
     }
 
-    private async Task RunPollLoopAsync(CancellationToken token)
+    private async Task RunPollLoopAsync(CancellationTokenSource cts)
     {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        // Polling is only a fallback: NotificationChanged wakes this immediately when it fires.
+        // GetNotificationsAsync is a comparatively expensive WinRT call (~130 ms), so the
+        // fallback runs rarely instead of once per second.
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
         try
         {
-            while (await timer.WaitForNextTickAsync(token))
+            while (await timer.WaitForNextTickAsync(cts.Token))
             {
                 await PollAsync();
             }
         }
         catch (OperationCanceledException)
         {
+            // Normal shutdown path.
+        }
+        catch (Exception ex)
+        {
+            Error?.Invoke(this, ex);
+        }
+        finally
+        {
+            // Clear the field before disposing so Dispose() never cancels a dead source.
+            Interlocked.CompareExchange(ref _cts, null, cts);
+            cts.Dispose();
         }
     }
 
     public async Task PollAsync()
     {
-        if (!_started || AccessStatus != UserNotificationListenerAccessStatus.Allowed)
+        if (Volatile.Read(ref _disposed) != 0 || Volatile.Read(ref _started) == 0)
         {
             return;
         }
 
-        if (!await _pollGate.WaitAsync(0))
-        {
-            // Jangan dibuang: minta poll yang sedang berjalan untuk mengulang
-            Interlocked.Exchange(ref _pollRequested, 1);
-            return;
-        }
-
+        var gateTaken = false;
         try
         {
+            if (AccessStatus != UserNotificationListenerAccessStatus.Allowed)
+            {
+                return;
+            }
+
+            gateTaken = await _pollGate.WaitAsync(0);
+            if (!gateTaken)
+            {
+                // Jangan dibuang: minta poll yang sedang berjalan untuk mengulang
+                Interlocked.Exchange(ref _pollRequested, 1);
+                return;
+            }
+
             do
             {
                 Interlocked.Exchange(ref _pollRequested, 0);
@@ -119,6 +159,11 @@ public sealed class WindowsNotificationService : IDisposable
                         continue;
                     }
 
+                    if (Volatile.Read(ref _disposed) != 0)
+                    {
+                        break;
+                    }
+
                     try
                     {
                         Publish(notification);
@@ -132,7 +177,7 @@ public sealed class WindowsNotificationService : IDisposable
                 // Buang ID notifikasi yang sudah tidak ada, supaya set tidak membengkak
                 _seenIds.IntersectWith(currentIds);
             }
-            while (Volatile.Read(ref _pollRequested) == 1);
+            while (Volatile.Read(ref _pollRequested) == 1 && Volatile.Read(ref _disposed) == 0);
         }
         catch (Exception ex)
         {
@@ -140,7 +185,10 @@ public sealed class WindowsNotificationService : IDisposable
         }
         finally
         {
-            _pollGate.Release();
+            if (gateTaken)
+            {
+                _pollGate.Release();
+            }
         }
     }
 
@@ -148,7 +196,8 @@ public sealed class WindowsNotificationService : IDisposable
         UserNotificationListener sender,
         UserNotificationChangedEventArgs args)
     {
-        if (args.ChangeKind == UserNotificationChangedKind.Added)
+        if (args.ChangeKind == UserNotificationChangedKind.Added &&
+            Volatile.Read(ref _disposed) == 0)
         {
             _ = PollAsync();
         }
@@ -179,14 +228,34 @@ public sealed class WindowsNotificationService : IDisposable
 
     public void Dispose()
     {
-        if (_started)
+        lock (_lifecycleLock)
         {
-            try { _listener.NotificationChanged -= Listener_NotificationChanged; } catch { }
-            _cts?.Cancel();
-            _cts?.Dispose();
-            _started = false;
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                _listener.NotificationChanged -= Listener_NotificationChanged;
+            }
+            catch (Exception ex)
+            {
+                Error?.Invoke(this, ex);
+            }
+
+            try
+            {
+                _cts?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The poll loop already finished and disposed its own token source.
+            }
         }
 
-        _pollGate.Dispose();
+        // _pollGate sengaja tidak di-dispose: poll yang dimulai sebelum Dispose bisa masih
+        // berjalan dan akan melempar ObjectDisposedException. Semaphore tanpa wait handle
+        // tidak memegang resource unmanaged, jadi cukup dibiarkan di-GC.
     }
 }

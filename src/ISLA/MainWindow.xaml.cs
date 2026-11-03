@@ -11,6 +11,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using System.Windows.Interop;
 using Windows.Devices.Radios;
+using ISLA.Infrastructure;
 using ISLA.Media;
 using ISLA.Notifications;
 using ISLA.Pomodoro;
@@ -32,6 +33,8 @@ public partial class MainWindow : Window
     private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int index, IntPtr value);
 
     // ---- Island geometry -------------------------------------------------------------
+    // Single source of truth. MainWindow.xaml mirrors the initial sizes:
+    // IslandSurface 180x30, CompactContent 170, NodeNotificationContent 298.
     private const double CompactWidth = 180;
     private const double CompactHeight = 30;
     private const double NotificationWidth = 306;
@@ -107,7 +110,6 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _pomodoroTimer;
     private readonly DispatcherTimer _systemStateTimer;
     private readonly DispatcherTimer _nodeNotificationTimer;
-    private readonly DispatcherTimer _windowsNotificationPollTimer;
     private readonly DispatcherTimer _idleTimer;
     private readonly WindowsToastService _windowsToastService = new();
     private readonly WindowsNotificationService _windowsNotificationService = new();
@@ -198,6 +200,7 @@ public partial class MainWindow : Window
     private DateTime _lastInteractionUtc;
     private bool _isIdleNotch;
     private int _lastBatteryPercent = -1;
+    private int _clockMinuteKey = -1;
     private bool _refreshingMedia;
     private bool _refreshingSettings;
     private System.Windows.Media.Brush _normalBatteryBrush = System.Windows.Media.Brushes.White;
@@ -242,8 +245,6 @@ public partial class MainWindow : Window
         _systemStateTimer.Tick += SystemStateTimer_Tick;
         _nodeNotificationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _nodeNotificationTimer.Tick += NodeNotificationTimer_Tick;
-        _windowsNotificationPollTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-        _windowsNotificationPollTimer.Tick += WindowsNotificationPollTimer_Tick;
         _idleTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _idleTimer.Tick += IdleTimer_Tick;
         Loaded += MainWindow_Loaded;
@@ -255,9 +256,7 @@ public partial class MainWindow : Window
         PositionAtTopCenter();
         UpdateClock();
         _mediaRefreshTimer.Start();
-        _mediaProgressTimer.Start();
         _settingsRefreshTimer.Start();
-        _pomodoroTimer.Start();
         _systemStateTimer.Start();
         _lastInteractionUtc = DateTime.UtcNow;
         _idleTimer.Start();
@@ -268,11 +267,12 @@ public partial class MainWindow : Window
         _windowsNotificationService.Error += WindowsNotificationService_Error;
         try
         {
+            // The service polls itself (1 s loop) and wakes on NotificationChanged.
             await _windowsNotificationService.StartAsync();
-            _windowsNotificationPollTimer.Start();
         }
         catch (Exception exception)
         {
+            AppLog.Warn("Windows notification listener could not start.", exception);
             System.Windows.MessageBox.Show(
                 exception.Message,
                 "ISLA notification access",
@@ -305,12 +305,7 @@ public partial class MainWindow : Window
 
     private void WindowsNotificationService_Error(object? sender, Exception exception)
     {
-        Debug.WriteLine($"Windows notification listener error: {exception}");
-    }
-
-    private async void WindowsNotificationPollTimer_Tick(object? sender, EventArgs e)
-    {
-        await _windowsNotificationService.PollAsync();
+        AppLog.Error("Windows notification listener error.", exception);
     }
 
     private NotifyIcon CreateTrayIcon()
@@ -396,7 +391,38 @@ public partial class MainWindow : Window
 
     private async void SettingsRefreshTimer_Tick(object? sender, EventArgs e)
     {
-        await RefreshSettingsAsync();
+        // The hardware panels are only visible in Settings; elsewhere only wireless changes
+        // matter, and that path skips COM/WMI entirely.
+        if (_isExpanded && _activeTab == "Settings")
+        {
+            await RefreshSettingsAsync();
+            return;
+        }
+
+        await RefreshWirelessAsync();
+    }
+
+    private async Task RefreshWirelessAsync()
+    {
+        if (_refreshingSettings)
+        {
+            return;
+        }
+
+        _refreshingSettings = true;
+        try
+        {
+            var state = await _quickSettingsService.GetStateAsync(includeHardware: false);
+            NotifyWirelessChanges(state);
+        }
+        catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
+        {
+            // Wireless change notifications are best effort.
+        }
+        finally
+        {
+            _refreshingSettings = false;
+        }
     }
 
     private DateTime _lastSettingsRefreshUtc = DateTime.MinValue;
@@ -426,10 +452,18 @@ public partial class MainWindow : Window
             // Don't fight the user while they are dragging the slider.
             if (!VolumeSlider.IsMouseCaptureWithin)
             {
-                _updatingVolumeSlider = true;
-                VolumeSlider.Value = state.Volume;
-                _updatingVolumeSlider = false;
-                SetText(VolumeValueText, $"{state.Volume:P0}{(state.IsMuted ? " (muted)" : string.Empty)}");
+                if (state.Volume is double volume)
+                {
+                    _updatingVolumeSlider = true;
+                    VolumeSlider.Value = volume;
+                    _updatingVolumeSlider = false;
+                    SetText(VolumeValueText, $"{volume:P0}{(state.IsMuted ? " (muted)" : string.Empty)}");
+                }
+                else
+                {
+                    // No audio output device: keep the slider where it is and show "--".
+                    SetText(VolumeValueText, "--");
+                }
             }
 
             // The fast power poll owns the battery state; this is only the fallback when
@@ -605,19 +639,33 @@ public partial class MainWindow : Window
 
     private void NotifyWirelessChanges(QuickSettingsState state)
     {
-        if (_lastWiFiStatus is not null && !string.Equals(_lastWiFiStatus, state.WiFiStatus, StringComparison.Ordinal))
+        var wifiConnected = IsWifiConnected(state.WiFiStatus);
+        var wifiSsid = GetWifiSsid(state.WiFiStatus);
+        if (_lastWiFiStatus is not null)
         {
-            if (state.WiFiStatus.StartsWith("On — ", StringComparison.Ordinal))
+            var wasConnected = IsWifiConnected(_lastWiFiStatus);
+            var previousSsid = GetWifiSsid(_lastWiFiStatus);
+
+            if (wifiConnected != wasConnected)
             {
-                ShowNodeNotification($"Wi-Fi connected to {state.WiFiStatus[5..]}", dropIfExpanded: true);
+                if (wifiConnected)
+                {
+                    ShowNodeNotification(
+                        wifiSsid is null ? "Wi-Fi on" : $"Wi-Fi connected to {wifiSsid}",
+                        dropIfExpanded: true);
+                }
+                else if (state.WiFiStatus == "Off")
+                {
+                    ShowNodeNotification("Wi-Fi off", dropIfExpanded: true);
+                }
             }
-            else if (state.WiFiStatus == "On")
+            else if (wifiConnected &&
+                     wifiSsid is not null &&
+                     previousSsid is not null &&
+                     !string.Equals(previousSsid, wifiSsid, StringComparison.Ordinal))
             {
-                ShowNodeNotification("Wi-Fi on", dropIfExpanded: true);
-            }
-            else if (state.WiFiStatus == "Off")
-            {
-                ShowNodeNotification("Wi-Fi off", dropIfExpanded: true);
+                // Roamed to another network while staying connected.
+                ShowNodeNotification($"Wi-Fi connected to {wifiSsid}", dropIfExpanded: true);
             }
         }
         _lastWiFiStatus = state.WiFiStatus;
@@ -635,6 +683,12 @@ public partial class MainWindow : Window
         }
         _lastBluetoothStatus = state.BluetoothStatus;
     }
+
+    private static bool IsWifiConnected(string status) =>
+        status == "On" || status.StartsWith("On — ", StringComparison.Ordinal);
+
+    private static string? GetWifiSsid(string status) =>
+        status.StartsWith("On — ", StringComparison.Ordinal) ? status[5..] : null;
 
     // =================================================================================
     //  Battery (fast path: reacts within ~0.5 s of plugging/unplugging)
@@ -1145,17 +1199,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BrightnessSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private async void BrightnessSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (!IsLoaded || !BrightnessSlider.IsMouseCaptureWithin)
         {
             return;
         }
 
+        var value = (int)Math.Round(e.NewValue);
+        SetText(BrightnessValueText, $"{value}%");
+
         try
         {
-            _quickSettingsService.SetBrightness((int)Math.Round(e.NewValue));
-            SetText(BrightnessValueText, $"{(int)Math.Round(e.NewValue)}%");
+            // WMI runs on the thread pool, so the slider stays responsive.
+            await _quickSettingsService.SetBrightnessAsync(value);
         }
         catch (Exception exception) when (exception is InvalidOperationException or UnauthorizedAccessException or System.Management.ManagementException)
         {
@@ -1370,9 +1427,36 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// The 125 ms progress clock only matters while the Media panel is on screen. Keeping it
+    /// stopped everywhere else avoids needless string formatting, layout, and render passes.
+    /// </summary>
+    private void UpdateMediaProgressTimer()
+    {
+        var shouldRun = _isExpanded &&
+                        _activeTab == "Media" &&
+                        _lastMediaState?.PlaybackStatus == "Playing";
+        if (shouldRun)
+        {
+            _mediaProgressTimer.Start();
+        }
+        else
+        {
+            _mediaProgressTimer.Stop();
+        }
+    }
+
     private void UpdateClock()
     {
-        SetText(ClockText, DateTime.Now.ToString("HH:mm"));
+        var now = DateTime.Now;
+        var minuteKey = (now.Hour * 60) + now.Minute;
+        if (minuteKey == _clockMinuteKey)
+        {
+            return;
+        }
+
+        _clockMinuteKey = minuteKey;
+        SetText(ClockText, now.ToString("HH:mm"));
     }
 
     private async Task RefreshMediaAsync()
@@ -1389,14 +1473,14 @@ public partial class MainWindow : Window
             var state = await _mediaService.GetCurrentStateAsync();
             SyncMediaAnchor(state);
             _lastMediaState = state;
-            if (state.PlaybackStatus == "Playing")
-            {
-                _mediaProgressTimer.Start();
-            }
-            else
-            {
-                _mediaProgressTimer.Stop();
-            }
+
+            // Poll quickly while a player is active; fall back to a slower heartbeat otherwise.
+            // The MediaWatcher still wakes us immediately on track/session changes.
+            _mediaRefreshTimer.Interval = state.PlaybackStatus == "Playing"
+                ? TimeSpan.FromSeconds(2)
+                : TimeSpan.FromSeconds(5);
+
+            UpdateMediaProgressTimer();
 
             // Track info cross-fades in only when it actually changes.
             SetTextFade(MediaTitleText, state.Title);
@@ -1494,10 +1578,15 @@ public partial class MainWindow : Window
         AnimateSpectrum(IdleSpectrum, _spectrumActive && _isIdleNotch);
     }
 
+    // Spectrum bar timing: shared static data, so starting the animation allocates no arrays.
+    private static readonly double[] SpectrumSeconds = [0.46, 0.62, 0.38, 0.56, 0.50];
+    private static readonly double[] SpectrumLows = [0.25, 0.20, 0.30, 0.22, 0.28];
+    private static readonly IEasingFunction SpectrumEase =
+        Frozen(new SineEase { EasingMode = EasingMode.EaseInOut });
+    private const int SpectrumFrameRate = 15;
+
     private static void AnimateSpectrum(StackPanel panel, bool run)
     {
-        double[] seconds = [0.46, 0.62, 0.38, 0.56, 0.50];
-        double[] lows = [0.25, 0.20, 0.30, 0.22, 0.28];
         for (var i = 0; i < panel.Children.Count; i++)
         {
             if (panel.Children[i].RenderTransform is not ScaleTransform scale)
@@ -1507,16 +1596,20 @@ public partial class MainWindow : Window
 
             if (run)
             {
-                scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation
+                var animation = new DoubleAnimation
                 {
-                    From = lows[i % lows.Length],
+                    From = SpectrumLows[i % SpectrumLows.Length],
                     To = 1,
-                    Duration = TimeSpan.FromSeconds(seconds[i % seconds.Length]),
+                    Duration = TimeSpan.FromSeconds(SpectrumSeconds[i % SpectrumSeconds.Length]),
                     BeginTime = TimeSpan.FromMilliseconds(i * 70),
                     AutoReverse = true,
                     RepeatBehavior = RepeatBehavior.Forever,
-                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-                });
+                    EasingFunction = SpectrumEase
+                };
+
+                // A 60 fps bar chart is wasted work for five tiny rectangles.
+                Timeline.SetDesiredFrameRate(animation, SpectrumFrameRate);
+                scale.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
             }
             else
             {
@@ -1611,7 +1704,7 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             // Without the watcher everything still works through the 2 s poll.
-            Debug.WriteLine($"Media watcher unavailable: {exception}");
+            AppLog.Warn("Media watcher unavailable; falling back to polling.", exception);
         }
     }
 
@@ -1788,8 +1881,6 @@ public partial class MainWindow : Window
     /// </summary>
     private void SetMediaProgress(double progress)
     {
-        var property = System.Windows.Controls.ProgressBar.ValueProperty;
-        MediaProgress.BeginAnimation(property, null);
         MediaProgress.Value = progress;
     }
 
@@ -2095,6 +2186,12 @@ public partial class MainWindow : Window
 
         _isExpanded = expanded;
         var version = ++_expandVersion;
+        UpdateMediaProgressTimer();
+        if (expanded && _activeTab == "Media" && _lastMediaState is { } media)
+        {
+            // Show the current position immediately: the fast progress timer was stopped.
+            UpdateMediaProgressDisplay(media);
+        }
 
         var targetWidth = expanded ? ExpandedWidth : CompactWidth;
         var targetHeight = expanded ? GetTabHeight(_activeTab) : CompactHeight;
@@ -2183,7 +2280,6 @@ public partial class MainWindow : Window
         _systemStateTimer.Stop();
         _nodeNotificationTimer.Stop();
         _idleTimer.Stop();
-        _windowsNotificationPollTimer.Stop();
         _windowsNotificationService.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
@@ -2218,19 +2314,21 @@ public partial class MainWindow : Window
         await RefreshMediaAsync();
     }
 
-    private void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    private async void VolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (_updatingVolumeSlider || !IsLoaded)
         {
             return;
         }
 
+        SetText(VolumeValueText, $"{e.NewValue:P0}");
+
         try
         {
-            _quickSettingsService.SetVolume(e.NewValue);
-            SetText(VolumeValueText, $"{e.NewValue:P0}");
+            // The audio endpoint is COM; it runs on the thread pool.
+            await _quickSettingsService.SetVolumeAsync(e.NewValue);
         }
-        catch (COMException exception)
+        catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
         {
             SetText(SettingsStatusText, $"Volume unavailable: {exception.Message}");
         }
@@ -2262,6 +2360,17 @@ public partial class MainWindow : Window
     private void RefreshPomodoro()
     {
         var state = _pomodoroService.State;
+
+        // Tick only while a session is running; an idle timer never changes on its own.
+        if (state.IsRunning)
+        {
+            _pomodoroTimer.Start();
+        }
+        else
+        {
+            _pomodoroTimer.Stop();
+        }
+
         SetText(PomodoroTimeText, $"{(int)state.Remaining.TotalMinutes:00}:{state.Remaining.Seconds:00}");
         SetText(PomodoroPhaseText, state.Phase switch
         {
@@ -2816,6 +2925,11 @@ public partial class MainWindow : Window
         }
 
         _activeTab = tab;
+        UpdateMediaProgressTimer();
+        if (tab == "Media" && _lastMediaState is { } media)
+        {
+            UpdateMediaProgressDisplay(media);
+        }
         if (tab == "Settings")
         {
             RefreshSettingsIfStale();

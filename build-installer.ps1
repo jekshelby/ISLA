@@ -12,6 +12,19 @@ $identityDirectory = Join-Path $root 'artifacts\identity'
 $release = Join-Path $root 'release'
 $setup = Join-Path $release 'ISLA-Setup.exe'
 
+# Single product version, shared with the projects through Directory.Build.props.
+$versionNode = Select-Xml -Path (Join-Path $root 'Directory.Build.props') -XPath '/Project/PropertyGroup/Version' |
+    Select-Object -First 1
+if ($null -eq $versionNode) {
+    throw 'Version is missing from Directory.Build.props.'
+}
+$version = $versionNode.Node.InnerText.Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Version in Directory.Build.props must be X.Y.Z (found '$version')."
+}
+$msixVersion = "$version.0"
+$setupVersioned = Join-Path $release "ISLA-Setup-v$version.exe"
+
 New-Item $release -ItemType Directory -Force | Out-Null
 Remove-Item $identityDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $identityDirectory -ItemType Directory -Force | Out-Null
@@ -19,7 +32,7 @@ New-Item $identityDirectory -ItemType Directory -Force | Out-Null
 $identityAssets = Join-Path $identityDirectory 'Assets'
 New-Item $identityAssets -ItemType Directory -Force | Out-Null
 Copy-Item (Join-Path $installer 'Assets\ISLA.png') (Join-Path $identityAssets 'ISLA.png') -Force
-Remove-Item $payload, $identityPackage, $identityCertificate, $setup -Force -ErrorAction SilentlyContinue
+Remove-Item $payload, $identityPackage, $identityCertificate, $setup, $setupVersioned -Force -ErrorAction SilentlyContinue
 dotnet publish $project -c Release -r win-x64 --self-contained false
 if ($LASTEXITCODE -ne 0) { throw 'ISLA publish failed.' }
 Compress-Archive -Path (Join-Path $publish '*') -DestinationPath $payload -CompressionLevel Optimal
@@ -44,7 +57,7 @@ $manifest = @'
   xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows/10/3"
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
-  <Identity Name="ISLA.Identity" Publisher="CN=ISLA Development" Version="1.0.0.0" ProcessorArchitecture="neutral" />
+  <Identity Name="ISLA.Identity" Publisher="CN=ISLA Development" Version="__VERSION__" ProcessorArchitecture="neutral" />
   <Properties>
     <DisplayName>ISLA</DisplayName>
     <PublisherDisplayName>ISLA Development</PublisherDisplayName>
@@ -69,6 +82,7 @@ $manifest = @'
   </Applications>
 </Package>
 '@
+$manifest = $manifest.Replace('__VERSION__', $msixVersion)
 $manifestPath = Join-Path $identityDirectory 'AppxManifest.xml'
 Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
 & $makeAppx.FullName pack /o /nv /d $identityDirectory /p $identityPackage
@@ -93,4 +107,7 @@ Remove-Item $pfxPath -Force
 dotnet publish $installerProject -c Release -r win-x64 --self-contained false
 if ($LASTEXITCODE -ne 0) { throw 'Installer publish failed.' }
 Copy-Item (Join-Path $installer 'bin\Release\net10.0-windows\win-x64\publish\ISLA-Installer.exe') $setup -Force
+Copy-Item $setup $setupVersioned -Force
+Write-Host "Version: $version"
 Write-Host "Installer: $setup"
+Write-Host "Versioned installer: $setupVersioned"

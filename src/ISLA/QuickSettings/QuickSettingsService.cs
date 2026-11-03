@@ -8,7 +8,7 @@ using Windows.Networking.Connectivity;
 namespace ISLA.QuickSettings;
 
 public sealed record QuickSettingsState(
-    double Volume,
+    double? Volume,
     bool IsMuted,
     int BatteryPercent,
     bool IsPluggedIn,
@@ -21,23 +21,59 @@ public sealed class QuickSettingsService
 {
     private static Guid AudioEndpointVolumeId => new("5CDF2C82-841E-4546-9722-0CF74078229A");
 
-    public async Task<QuickSettingsState> GetStateAsync()
+    // Slider drags fire many updates; the gates let only one background write run at a time
+    // and collapse the queue to the newest value.
+    private readonly SemaphoreSlim _volumeGate = new(1, 1);
+    private readonly SemaphoreSlim _brightnessGate = new(1, 1);
+    private double _requestedVolume = double.NaN;
+    private int _requestedBrightness = -1;
+
+    public async Task<QuickSettingsState> GetStateAsync(bool includeHardware = true)
     {
-        var (volume, muted) = GetVolume();
-        var power = System.Windows.Forms.SystemInformation.PowerStatus;
-        var batteryPercent = GetBatteryPercent(power.BatteryLifePercent);
-        var radios = await GetRadioStatesAsync();
-        var brightness = GetBrightness();
+        if (!includeHardware)
+        {
+            // Lightweight path for the periodic wireless watcher: no COM/WMI and no SSID
+            // lookup, just the radio on/off state.
+            var radioState = await GetRadioStatesAsync(includeNetworkName: false).ConfigureAwait(false);
+            return new QuickSettingsState(
+                null,
+                false,
+                -1,
+                false,
+                radioState.WiFi,
+                radioState.Bluetooth,
+                "Unavailable",
+                -1);
+        }
+
+        // COM (audio endpoint) and WMI (brightness/battery) calls can block for a long time.
+        // Run them on the thread pool so the island never freezes while they are queried.
+        var audioTask = Task.Run(TryGetVolume);
+        var brightnessTask = Task.Run(GetBrightness);
+        var powerTask = Task.Run(ReadPowerState);
+        var radiosTask = GetRadioStatesAsync();
+
+        var audio = await audioTask.ConfigureAwait(false);
+        var brightness = await brightnessTask.ConfigureAwait(false);
+        var power = await powerTask.ConfigureAwait(false);
+        var radios = await radiosTask.ConfigureAwait(false);
 
         return new QuickSettingsState(
-            volume,
-            muted,
-            batteryPercent,
-            power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online,
+            audio?.Volume,
+            audio?.IsMuted ?? false,
+            power.Percent,
+            power.PluggedIn,
             radios.WiFi,
             radios.Bluetooth,
             brightness < 0 ? "Unavailable" : $"{brightness}%",
             brightness);
+    }
+
+    private static (int Percent, bool PluggedIn) ReadPowerState()
+    {
+        var power = System.Windows.Forms.SystemInformation.PowerStatus;
+        return (GetBatteryPercent(power.BatteryLifePercent),
+            power.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online);
     }
 
     private static int GetBatteryPercent(float systemPercent)
@@ -76,14 +112,55 @@ public sealed class QuickSettingsService
         return -1;
     }
 
-    public void SetVolume(double value)
+    /// <summary>
+    /// Applies the master volume on the thread pool, coalescing rapid slider updates so only
+    /// the newest value reaches the audio endpoint.
+    /// </summary>
+    public async Task SetVolumeAsync(double value)
     {
-        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Multimedia, out var device);
-        var interfaceId = AudioEndpointVolumeId;
-        device.Activate(ref interfaceId, ClsCtx.All, IntPtr.Zero, out var endpoint);
-        var volume = (IAudioEndpointVolume)endpoint;
-        volume.SetMasterVolumeLevelScalar((float)Math.Clamp(value, 0, 1), Guid.Empty);
+        Volatile.Write(ref _requestedVolume, Math.Clamp(value, 0, 1));
+
+        await _volumeGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await Task.Run(() =>
+            {
+                while (true)
+                {
+                    var target = Interlocked.Exchange(ref _requestedVolume, double.NaN);
+                    if (double.IsNaN(target))
+                    {
+                        break;
+                    }
+
+                    SetVolumeCore(target);
+                }
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            _volumeGate.Release();
+        }
+    }
+
+    private static void SetVolumeCore(double value)
+    {
+        IAudioEndpointVolume? volume = null;
+        try
+        {
+            volume = TryOpenEndpointVolume()
+                ?? throw new InvalidOperationException("No audio output device is available.");
+
+            var result = volume.SetMasterVolumeLevelScalar((float)Math.Clamp(value, 0, 1), Guid.Empty);
+            if (result < 0)
+            {
+                Marshal.ThrowExceptionForHR(result);
+            }
+        }
+        finally
+        {
+            ReleaseComObject(volume);
+        }
     }
 
     public async Task ToggleRadioAsync(RadioKind kind)
@@ -99,7 +176,38 @@ public sealed class QuickSettingsService
         await radio.SetStateAsync(targetState);
     }
 
-    public void SetBrightness(int value)
+    /// <summary>
+    /// Applies brightness on the thread pool. WMI is slow on many machines, and the gate keeps
+    /// a fast slider drag from queueing one WMI call per pixel.
+    /// </summary>
+    public async Task SetBrightnessAsync(int value)
+    {
+        Volatile.Write(ref _requestedBrightness, Math.Clamp(value, 0, 100));
+
+        await _brightnessGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await Task.Run(() =>
+            {
+                while (true)
+                {
+                    var target = Interlocked.Exchange(ref _requestedBrightness, -1);
+                    if (target < 0)
+                    {
+                        break;
+                    }
+
+                    SetBrightnessCore(target);
+                }
+            }).ConfigureAwait(false);
+        }
+        finally
+        {
+            _brightnessGate.Release();
+        }
+    }
+
+    private static void SetBrightnessCore(int value)
     {
         var brightness = Math.Clamp(value, 0, 100);
         using var searcher = new ManagementObjectSearcher(
@@ -139,29 +247,110 @@ public sealed class QuickSettingsService
         return -1;
     }
 
-    private static (double Volume, bool IsMuted) GetVolume()
+    /// <summary>
+    /// Reads the master volume of the default multimedia endpoint. Returns null when no audio
+    /// output is available, so the rest of the quick-settings state can still be shown.
+    /// </summary>
+    private static (double Volume, bool IsMuted)? TryGetVolume()
     {
-        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-        enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Multimedia, out var device);
-        var interfaceId = AudioEndpointVolumeId;
-        device.Activate(ref interfaceId, ClsCtx.All, IntPtr.Zero, out var endpoint);
-        var volume = (IAudioEndpointVolume)endpoint;
-        volume.GetMasterVolumeLevelScalar(out var scalar);
-        volume.GetMute(out var muted);
-        return (scalar, muted);
+        IAudioEndpointVolume? volume = null;
+        try
+        {
+            volume = TryOpenEndpointVolume();
+            if (volume is null)
+            {
+                return null;
+            }
+
+            var scalarResult = volume.GetMasterVolumeLevelScalar(out var scalar);
+            var muteResult = volume.GetMute(out var muted);
+            if (scalarResult < 0 || muteResult < 0)
+            {
+                return null;
+            }
+
+            return (Math.Clamp(scalar, 0f, 1f), muted);
+        }
+        catch (COMException)
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(volume);
+        }
     }
 
-    private static async Task<(string WiFi, string Bluetooth)> GetRadioStatesAsync()
+    /// <summary>
+    /// Opens the default multimedia endpoint. The returned interface owns its own COM
+    /// reference; the device and enumerator are released before returning.
+    /// </summary>
+    private static IAudioEndpointVolume? TryOpenEndpointVolume()
+    {
+        IMMDeviceEnumerator? enumerator = null;
+        IMMDevice? device = null;
+        try
+        {
+            enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+            var result = enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Multimedia, out device);
+            if (result < 0 || device is null)
+            {
+                return null;
+            }
+
+            var interfaceId = AudioEndpointVolumeId;
+            result = device.Activate(ref interfaceId, ClsCtx.All, IntPtr.Zero, out var endpoint);
+            if (result < 0)
+            {
+                return null;
+            }
+
+            return endpoint as IAudioEndpointVolume;
+        }
+        catch (COMException)
+        {
+            return null;
+        }
+        catch (InvalidCastException)
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(device);
+            ReleaseComObject(enumerator);
+        }
+    }
+
+    private static void ReleaseComObject(object? comObject)
+    {
+        if (comObject is null || !Marshal.IsComObject(comObject))
+        {
+            return;
+        }
+
+        try
+        {
+            Marshal.ReleaseComObject(comObject);
+        }
+        catch (ArgumentException)
+        {
+            // Already released: there is nothing left to do.
+        }
+    }
+
+    private static async Task<(string WiFi, string Bluetooth)> GetRadioStatesAsync(
+        bool includeNetworkName = true)
     {
         try
         {
-            var radios = await Radio.GetRadiosAsync();
+            var radios = await Radio.GetRadiosAsync().AsTask().ConfigureAwait(false);
             var wifi = radios.FirstOrDefault(radio => radio.Kind == RadioKind.WiFi);
             var bluetooth = radios.FirstOrDefault(radio => radio.Kind == RadioKind.Bluetooth);
             var wifiStatus = wifi is null ? "Unavailable" : wifi.State.ToString();
-            if (wifiStatus == "On")
+            if (wifiStatus == "On" && includeNetworkName)
             {
-                var networkName = await GetConnectedWifiNameAsync();
+                var networkName = await GetConnectedWifiNameAsync().ConfigureAwait(false);
                 if (!string.IsNullOrWhiteSpace(networkName))
                 {
                     wifiStatus = $"On — {networkName}";
@@ -184,20 +373,17 @@ public sealed class QuickSettingsService
     {
         try
         {
-            foreach (var profile in NetworkInformation.GetConnectionProfiles())
+            // Only the active profile matters; enumerating every profile is much slower.
+            var profile = NetworkInformation.GetInternetConnectionProfile();
+            if (profile is null ||
+                !profile.IsWlanConnectionProfile ||
+                profile.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.None)
             {
-                if (!profile.IsWlanConnectionProfile ||
-                    profile.GetNetworkConnectivityLevel() == NetworkConnectivityLevel.None)
-                {
-                    continue;
-                }
-
-                var ssid = profile.WlanConnectionProfileDetails?.GetConnectedSsid();
-                if (!string.IsNullOrWhiteSpace(ssid))
-                {
-                    return ssid;
-                }
+                return null;
             }
+
+            var ssid = profile.WlanConnectionProfileDetails?.GetConnectedSsid();
+            return string.IsNullOrWhiteSpace(ssid) ? null : ssid;
         }
         catch (Exception exception) when (exception is COMException or InvalidOperationException or UnauthorizedAccessException)
         {
@@ -230,8 +416,8 @@ public sealed class QuickSettingsService
                 return null;
             }
 
-            var output = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
+            var output = await process.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+            await process.WaitForExitAsync().ConfigureAwait(false);
             if (process.ExitCode != 0)
             {
                 return null;
@@ -248,12 +434,16 @@ public sealed class QuickSettingsService
 
     private enum EDataFlow
     {
-        Render
+        Render = 0,
+        Capture = 1,
+        All = 2
     }
 
     private enum ERole
     {
-        Multimedia
+        Console = 0,
+        Multimedia = 1,
+        Communications = 2
     }
 
     [Flags]
@@ -274,8 +464,8 @@ public sealed class QuickSettingsService
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceEnumerator
     {
-        int EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IntPtr devices);
-        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice endpoint);
+        [PreserveSig] int EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IntPtr devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice endpoint);
     }
 
     [ComImport]
@@ -283,7 +473,7 @@ public sealed class QuickSettingsService
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDevice
     {
-        int Activate(ref Guid iid, ClsCtx clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.Interface)] out object interfacePointer);
+        [PreserveSig] int Activate(ref Guid iid, ClsCtx clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.Interface)] out object interfacePointer);
     }
 
     [ComImport]
@@ -291,18 +481,18 @@ public sealed class QuickSettingsService
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioEndpointVolume
     {
-        int RegisterControlChangeNotify(IntPtr notify);
-        int UnregisterControlChangeNotify(IntPtr notify);
-        int GetChannelCount(out uint channelCount);
-        int SetMasterVolumeLevel(float level, Guid eventContext);
-        int SetMasterVolumeLevelScalar(float level, Guid eventContext);
-        int GetMasterVolumeLevel(out float level);
-        int GetMasterVolumeLevelScalar(out float level);
-        int SetChannelVolumeLevel(uint channelNumber, float level, Guid eventContext);
-        int SetChannelVolumeLevelScalar(uint channelNumber, float level, Guid eventContext);
-        int GetChannelVolumeLevel(uint channelNumber, out float level);
-        int GetChannelVolumeLevelScalar(uint channelNumber, out float level);
-        int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, Guid eventContext);
-        int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
+        [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
+        [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
+        [PreserveSig] int GetChannelCount(out uint channelCount);
+        [PreserveSig] int SetMasterVolumeLevel(float level, Guid eventContext);
+        [PreserveSig] int SetMasterVolumeLevelScalar(float level, Guid eventContext);
+        [PreserveSig] int GetMasterVolumeLevel(out float level);
+        [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+        [PreserveSig] int SetChannelVolumeLevel(uint channelNumber, float level, Guid eventContext);
+        [PreserveSig] int SetChannelVolumeLevelScalar(uint channelNumber, float level, Guid eventContext);
+        [PreserveSig] int GetChannelVolumeLevel(uint channelNumber, out float level);
+        [PreserveSig] int GetChannelVolumeLevelScalar(uint channelNumber, out float level);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool mute, Guid eventContext);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool mute);
     }
 }
