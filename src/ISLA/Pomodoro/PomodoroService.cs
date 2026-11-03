@@ -17,6 +17,14 @@ public sealed class PomodoroState
     public bool IsRunning { get; set; }
     public DateTime? EndsAtUtc { get; set; }
     public TimeSpan Remaining { get; set; } = TimeSpan.FromMinutes(25);
+
+    // Chosen durations (minutes). Old pomodoro.json files without these keep the defaults.
+    public int FocusMinutes { get; set; } = 25;
+    public int ShortBreakMinutes { get; set; } = 5;
+    public int LongBreakMinutes { get; set; } = 15;
+
+    // Hold Windows notifications while a focus session is running.
+    public bool FocusModeEnabled { get; set; }
 }
 
 public sealed class PomodoroService
@@ -27,6 +35,10 @@ public sealed class PomodoroService
         "pomodoro.json");
 
     public PomodoroState State { get; private set; } = new();
+
+    /// <summary>Phase and length (minutes) of the session that just ended, set when <see cref="Update"/> returns true.</summary>
+    public PomodoroPhase LastCompletedPhase { get; private set; }
+    public int LastCompletedMinutes { get; private set; }
 
     public PomodoroService()
     {
@@ -49,6 +61,8 @@ public sealed class PomodoroService
         State.Remaining = TimeSpan.Zero;
         State.IsRunning = false;
         State.EndsAtUtc = null;
+        LastCompletedPhase = State.Phase;
+        LastCompletedMinutes = (int)PhaseDuration(State.Phase).TotalMinutes;
         AdvancePhase();
         Save();
         return true;
@@ -84,7 +98,51 @@ public sealed class PomodoroService
     {
         State.IsRunning = false;
         State.EndsAtUtc = null;
-        State.Remaining = DurationFor(State.Phase);
+        State.Remaining = PhaseDuration(State.Phase);
+        Save();
+    }
+
+    /// <summary>Sets the length of a phase. If that phase is the one on the timer (and it is not running), the timer shows the new length at once.</summary>
+    public void SetDuration(PomodoroPhase phase, int minutes)
+    {
+        minutes = Math.Clamp(minutes, 1, 180);
+        switch (phase)
+        {
+            case PomodoroPhase.ShortBreak:
+                State.ShortBreakMinutes = minutes;
+                break;
+            case PomodoroPhase.LongBreak:
+                State.LongBreakMinutes = minutes;
+                break;
+            default:
+                State.FocusMinutes = minutes;
+                break;
+        }
+
+        if (State.Phase == phase && !State.IsRunning)
+        {
+            State.Remaining = PhaseDuration(phase);
+        }
+
+        Save();
+    }
+
+    /// <summary>Switches the timer to Focus / Short break / Long break. Ignored while the timer is running.</summary>
+    public void SelectPhase(PomodoroPhase phase)
+    {
+        if (State.IsRunning || State.Phase == phase)
+        {
+            return;
+        }
+
+        State.Phase = phase;
+        State.Remaining = PhaseDuration(phase);
+        Save();
+    }
+
+    public void SetFocusMode(bool enabled)
+    {
+        State.FocusModeEnabled = enabled;
         Save();
     }
 
@@ -102,14 +160,14 @@ public sealed class PomodoroService
             State.Phase = PomodoroPhase.Focus;
         }
 
-        State.Remaining = DurationFor(State.Phase);
+        State.Remaining = PhaseDuration(State.Phase);
     }
 
-    private static TimeSpan DurationFor(PomodoroPhase phase) => phase switch
+    public TimeSpan PhaseDuration(PomodoroPhase phase) => phase switch
     {
-        PomodoroPhase.ShortBreak => TimeSpan.FromMinutes(5),
-        PomodoroPhase.LongBreak => TimeSpan.FromMinutes(15),
-        _ => TimeSpan.FromMinutes(25)
+        PomodoroPhase.ShortBreak => TimeSpan.FromMinutes(Math.Clamp(State.ShortBreakMinutes, 1, 180)),
+        PomodoroPhase.LongBreak => TimeSpan.FromMinutes(Math.Clamp(State.LongBreakMinutes, 1, 180)),
+        _ => TimeSpan.FromMinutes(Math.Clamp(State.FocusMinutes, 1, 180))
     };
 
     private void Load()
@@ -142,10 +200,17 @@ public sealed class PomodoroService
 
     private void Save()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
-        File.WriteAllText(_statePath, JsonSerializer.Serialize(State, new JsonSerializerOptions
+        try
         {
-            WriteIndented = true
-        }));
+            Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
+            File.WriteAllText(_statePath, JsonSerializer.Serialize(State, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            }));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A locked or read-only state file must never crash the timer; it is only persistence.
+        }
     }
 }

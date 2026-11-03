@@ -51,7 +51,8 @@
                           Height="22"
                           HorizontalAlignment="Stretch"
                           VerticalAlignment="Center">
-                        <Grid Width="22"
+                        <Grid x:Name="CompactBatteryRingHost"
+                              Width="22"
                               Height="22"
                               HorizontalAlignment="Left">
                             <Ellipse Stroke="#38383D" StrokeThickness="3" />
@@ -66,6 +67,23 @@
                                   Width="9" Height="13" Stretch="Uniform"
                                   HorizontalAlignment="Center" VerticalAlignment="Center"
                                   Visibility="Collapsed" />
+                        </Grid>
+                        <!-- Replaces the battery ring while the Pomodoro timer runs: red tomato + remaining-time ring -->
+                        <Grid x:Name="CompactPomodoro"
+                              Width="22"
+                              Height="22"
+                              HorizontalAlignment="Left"
+                              Visibility="Collapsed">
+                            <Ellipse Stroke="#38383D" StrokeThickness="3" />
+                            <Path x:Name="CompactPomodoroRing"
+                                  Stroke="#FF4D42"
+                                  StrokeThickness="3"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round" />
+                            <Border x:Name="CompactPomodoroIconHost"
+                                    Width="12" Height="12"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center" />
                         </Grid>
                         <TextBlock x:Name="CompactBatteryPercentText"
                                    Style="{StaticResource CompactPercentStyle}"
@@ -95,6 +113,14 @@
                                Style="{StaticResource ClockStyle}"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center" />
+                    <!-- Idle-notch Pomodoro tomato (left edge while the timer runs) -->
+                    <Border x:Name="IdlePomodoro"
+                            Width="11" Height="11"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            Margin="12,0,0,0"
+                            Visibility="Collapsed"
+                            IsHitTestVisible="False" />
                     <!-- Idle-notch spectrum (right of the clock while media is playing) -->
                     <StackPanel x:Name="IdleSpectrum"
                                 Orientation="Horizontal"
@@ -535,7 +561,12 @@
                         </StackPanel>
 
                         <!-- ===== TIMER PANEL ===== -->
-                        <StackPanel x:Name="TimerPanel" Visibility="Collapsed" VerticalAlignment="Center">
+                        <Grid x:Name="TimerPanel" Visibility="Collapsed" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="Focus timer" Style="{StaticResource EyebrowStyle}" />
                             <TextBlock x:Name="PomodoroTimeText"
                                        Text="25:00"
@@ -607,6 +638,43 @@
                                        Style="{StaticResource MetadataStyle}"
                                        Margin="0,8,0,0" />
                         </StackPanel>
+                            <Border Grid.Column="1"
+                                    Style="{StaticResource SettingsCardStyle}"
+                                    Width="236"
+                                    Margin="12,0,0,0"
+                                    Padding="14,10"
+                                    VerticalAlignment="Center">
+                                <StackPanel>
+                                    <TextBlock Text="Mode" Style="{StaticResource EyebrowStyle}" Margin="0,0,0,6" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <ToggleButton x:Name="PhaseFocusButton" Content="Focus" Tag="Focus" Width="64"
+                                                      Style="{StaticResource DurationChipStyle}" Click="PhaseButton_Click" />
+                                        <ToggleButton x:Name="PhaseShortButton" Content="Short" Tag="ShortBreak" Width="64"
+                                                      Style="{StaticResource DurationChipStyle}" Click="PhaseButton_Click" />
+                                        <ToggleButton x:Name="PhaseLongButton" Content="Long" Tag="LongBreak" Width="64"
+                                                      Style="{StaticResource DurationChipStyle}" Click="PhaseButton_Click" />
+                                    </StackPanel>
+                                    <Grid Height="26">
+                                        <StackPanel x:Name="DurationChips" Orientation="Horizontal" VerticalAlignment="Center" />
+                                        <TextBlock Text="min" Style="{StaticResource MetadataStyle}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                    </Grid>
+                                    <Border Height="1" Background="{StaticResource IslandBorder}" Margin="0,8,0,8" />
+                                    <Grid Height="26">
+                                        <TextBlock Text="Focus mode" Style="{StaticResource CardLabelStyle}" VerticalAlignment="Center" HorizontalAlignment="Left" />
+                                        <ToggleButton x:Name="FocusModeSwitch"
+                                                      Style="{StaticResource IslandSwitchStyle}"
+                                                      HorizontalAlignment="Right"
+                                                      VerticalAlignment="Center"
+                                                      Click="FocusModeSwitch_Click" />
+                                    </Grid>
+                                    <TextBlock Text="Holds app notifications while you focus"
+                                               Style="{StaticResource MetadataStyle}"
+                                               FontSize="10.5"
+                                               TextWrapping="Wrap"
+                                               Margin="0,2,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
 
                         <!-- ===== DOCK ===== -->
                         <Border Grid.Row="1"

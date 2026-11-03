@@ -40,6 +40,8 @@ public partial class MainWindow : Window
     private const double IdleNotchWidth = CompactWidth * 0.3;
     // Wider notch used while media plays: clock on the left, spectrum on the right.
     private const double IdleMusicNotchWidth = 82;
+    private const double IdlePomodoroNotchWidth = 72;   // tomato + clock
+    private const double IdleBothNotchWidth = 104;      // tomato + clock + spectrum
     private const double IdleNotchHeight = CompactHeight * 0.5;
     // Bottom corner radius of the idle notch (same value used for IslandSurface.CornerRadius).
     private const double IdleNotchRadius = IdleNotchHeight / 2;
@@ -121,6 +123,31 @@ public partial class MainWindow : Window
     private int _tabVersion;
     private bool? _lastPlaying;
     private bool? _lastPomodoroRunning;
+
+    // Pomodoro indicator (compact island + idle notch), duration chips and focus mode
+    private sealed record DurationPick(PomodoroPhase Phase, int Minutes);
+    private static readonly int[] FocusPresets = [15, 25, 30, 45, 50];
+    private static readonly int[] ShortBreakPresets = [3, 5, 10];
+    private static readonly int[] LongBreakPresets = [10, 15, 20, 30];
+    private bool _pomodoroActive;
+    private double _lastPomodoroFraction = -1;
+    private ScaleTransform? _compactTomatoPulse;
+    private ScaleTransform? _idleTomatoPulse;
+    private FrameworkElement? _compactTomatoView;
+    private FrameworkElement? _compactCupView;
+    private FrameworkElement? _idleTomatoView;
+    private FrameworkElement? _idleCupView;
+    private FrameworkElement[]? _compactSteam;
+    private FrameworkElement[]? _idleSteam;
+    private bool _pomodoroIsBreak;
+    private static readonly System.Windows.Media.Brush PomodoroFocusBrush =
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0x4D, 0x42)));
+    private static readonly System.Windows.Media.Brush PomodoroBreakBrush =
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x4D, 0xA3, 0xFF)));
+    private string _durationChipSignature = string.Empty;
+    private PomodoroPhase? _chipsPhase;
+    private bool _focusModeHolding;
+    private readonly List<string> _heldNotificationApps = new();
     private string? _pomodoroNotice;
     private bool? _lastCapsLock;
     private bool? _lastCharging;
@@ -194,6 +221,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        InitializePomodoroUi();
         _normalBatteryBrush = (System.Windows.Media.Brush)FindResource("IslandAccent");
 
         _trayIconImage = LoadTrayIcon();
@@ -263,7 +291,16 @@ public partial class MainWindow : Window
         var message = string.IsNullOrWhiteSpace(notification.Body)
             ? notification.Title
             : $"{notification.Title} — {notification.Body}";
-        Dispatcher.BeginInvoke(() => ShowNodeNotification(notification.AppName, message, TimeSpan.FromSeconds(4)));
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (IsFocusModeActive())
+            {
+                HoldNotification(notification.AppName);
+                return;
+            }
+
+            ShowNodeNotification(notification.AppName, message, TimeSpan.FromSeconds(4));
+        });
     }
 
     private void WindowsNotificationService_Error(object? sender, Exception exception)
@@ -1420,6 +1457,11 @@ public partial class MainWindow : Window
         }
 
         _announcedTrackKey = key;
+        if (IsFocusModeActive())
+        {
+            return;
+        }
+
         var message = string.IsNullOrWhiteSpace(state.Artist) ? state.Title : $"{state.Title} — {state.Artist}";
         ShowNodeNotification("Now playing", message, TimeSpan.FromSeconds(3.5));
     }
@@ -1871,8 +1913,9 @@ public partial class MainWindow : Window
             {
                 IslandSurface.CornerRadius = new CornerRadius(0, 0, IdleNotchRadius, IdleNotchRadius);
                 SetIdleBatteryEdge(_lastBatteryPercent);
-                IdleBatteryTrack.Visibility = Visibility.Visible;
-                IdleBatteryEdge.Visibility = Visibility.Visible;
+                var edgeVisibility = _pomodoroActive ? Visibility.Collapsed : Visibility.Visible;
+                IdleBatteryTrack.Visibility = edgeVisibility;
+                IdleBatteryEdge.Visibility = edgeVisibility;
             }
         };
         BeginAnimation(IslandRadiusProperty, notchRadiusAnimation, HandoffBehavior.SnapshotAndReplace);
@@ -1880,7 +1923,13 @@ public partial class MainWindow : Window
         UpdateSpectrumAnimations();
     }
 
-    private double GetIdleNotchWidth() => _spectrumActive ? IdleMusicNotchWidth : IdleNotchWidth;
+    private double GetIdleNotchWidth() => (_pomodoroActive, _spectrumActive) switch
+    {
+        (true, true) => IdleBothNotchWidth,
+        (true, false) => IdlePomodoroNotchWidth,
+        (false, true) => IdleMusicNotchWidth,
+        _ => IdleNotchWidth
+    };
 
     /// <summary>
     /// Idle notch layout: centred clock normally; while media plays the clock moves to the
@@ -1889,9 +1938,28 @@ public partial class MainWindow : Window
     private void ApplyIdleClockLayout()
     {
         var music = _isIdleNotch && _spectrumActive;
-        ClockText.HorizontalAlignment = music ? System.Windows.HorizontalAlignment.Left : System.Windows.HorizontalAlignment.Center;
-        ClockText.Margin = music ? new Thickness(12, 0, 0, 0) : new Thickness(0);
+        var pomodoro = _isIdleNotch && _pomodoroActive;
+        if (pomodoro && !music)
+        {
+            // tomato on the left, clock on the right
+            ClockText.HorizontalAlignment = System.Windows.HorizontalAlignment.Right;
+            ClockText.Margin = new Thickness(0, 0, 10, 0);
+        }
+        else if (music && !pomodoro)
+        {
+            // clock on the left, spectrum on the right
+            ClockText.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+            ClockText.Margin = new Thickness(12, 0, 0, 0);
+        }
+        else
+        {
+            // nothing extra, or both: tomato left, clock centred, spectrum right
+            ClockText.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
+            ClockText.Margin = new Thickness(0);
+        }
+
         IdleSpectrum.Visibility = music ? Visibility.Visible : Visibility.Collapsed;
+        IdlePomodoro.Visibility = pomodoro ? Visibility.Visible : Visibility.Collapsed;
     }
 
     /// <summary>Media started/stopped while the notch is idle: grow or shrink it to fit.</summary>
@@ -1917,8 +1985,9 @@ public partial class MainWindow : Window
             if (_isIdleNotch && Math.Abs(_idleNotchWidth - target) < 0.5)
             {
                 SetIdleBatteryEdge(_lastBatteryPercent);
-                IdleBatteryTrack.Visibility = Visibility.Visible;
-                IdleBatteryEdge.Visibility = Visibility.Visible;
+                var edgeVisibility = _pomodoroActive ? Visibility.Collapsed : Visibility.Visible;
+                IdleBatteryTrack.Visibility = edgeVisibility;
+                IdleBatteryEdge.Visibility = edgeVisibility;
             }
         };
         IslandSurface.BeginAnimation(WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
@@ -2177,6 +2246,14 @@ public partial class MainWindow : Window
         {
             _pomodoroNotice = "Session complete. Next phase is ready.";
             System.Media.SystemSounds.Exclamation.Play();
+            var phaseName = _pomodoroService.LastCompletedPhase switch
+            {
+                PomodoroPhase.ShortBreak => "short break",
+                PomodoroPhase.LongBreak => "long break",
+                _ => "focus"
+            };
+            ShowNodeNotification("Pomodoro", $"{_pomodoroService.LastCompletedMinutes} min {phaseName} complete",
+                TimeSpan.FromSeconds(5));
         }
 
         RefreshPomodoro();
@@ -2195,8 +2272,27 @@ public partial class MainWindow : Window
         SetText(PomodoroSessionsText, $"Sessions: {state.CompletedFocusSessions}");
         SetPomodoroIcon(state.IsRunning);
 
+        SetPomodoroActive(state.IsRunning);
+        SetPomodoroBreak(state.Phase != PomodoroPhase.Focus);
+        if (state.IsRunning)
+        {
+            var total = _pomodoroService.PhaseDuration(state.Phase).TotalSeconds;
+            SetPomodoroRing(total <= 0 ? 0 : state.Remaining.TotalSeconds / total);
+        }
+
+        RefreshDurationChips(state);
+        if (FocusModeSwitch.IsChecked != state.FocusModeEnabled)
+        {
+            FocusModeSwitch.IsChecked = state.FocusModeEnabled;
+        }
+
+        UpdateFocusMode();
+
         // The "session complete" notice stays visible until the user acts again.
-        SetText(PomodoroStatusText, _pomodoroNotice ?? (state.IsRunning ? "Timer running" : "Ready"));
+        var running = IsFocusModeActive()
+            ? (_heldNotificationApps.Count > 0 ? $"Focus mode on, {_heldNotificationApps.Count} held" : "Focus mode on")
+            : "Timer running";
+        SetText(PomodoroStatusText, _pomodoroNotice ?? (state.IsRunning ? running : "Ready"));
     }
 
     private void PomodoroStartButton_Click(object sender, RoutedEventArgs e)
@@ -2213,6 +2309,473 @@ public partial class MainWindow : Window
         }
 
         RefreshPomodoro();
+    }
+
+    // ---- indicator: red tomato replaces the battery indicator while the timer runs ----
+
+    private void InitializePomodoroUi()
+    {
+        // Each indicator holds both icons: tomato for work, steaming cup for breaks.
+        _compactTomatoView = CreateTomatoIcon(12, out _compactTomatoPulse);
+        _compactCupView = CreateCupIcon(12, out _compactSteam);
+        _compactCupView.Visibility = Visibility.Collapsed;
+        CompactPomodoroIconHost.Child = new Grid { Children = { _compactTomatoView, _compactCupView } };
+
+        _idleTomatoView = CreateTomatoIcon(11, out _idleTomatoPulse);
+        _idleCupView = CreateCupIcon(11, out _idleSteam);
+        _idleCupView.Visibility = Visibility.Collapsed;
+        IdlePomodoro.Child = new Grid { Children = { _idleTomatoView, _idleCupView } };
+    }
+
+    private static FrameworkElement CreateTomatoIcon(double size, out ScaleTransform? pulse)
+    {
+        var red = new RadialGradientBrush
+        {
+            GradientOrigin = new System.Windows.Point(0.35, 0.3),
+            Center = new System.Windows.Point(0.45, 0.45),
+            RadiusX = 0.75,
+            RadiusY = 0.75
+        };
+        red.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(0xFF, 0x7A, 0x6E), 0));
+        red.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(0xFF, 0x45, 0x3A), 0.55));
+        red.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromRgb(0xD9, 0x2D, 0x24), 1));
+        var green = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x5D, 0xDB, 0x6F));
+
+        var body = new System.Windows.Shapes.Ellipse { Width = 17, Height = 15.5, Fill = red };
+        Canvas.SetLeft(body, 1.5);
+        Canvas.SetTop(body, 4);
+
+        var shine = new System.Windows.Shapes.Ellipse
+        {
+            Width = 4,
+            Height = 2.4,
+            Fill = new SolidColorBrush(System.Windows.Media.Color.FromArgb(0x70, 0xFF, 0xFF, 0xFF)),
+            RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+            RenderTransform = new RotateTransform(-30)
+        };
+        Canvas.SetLeft(shine, 4.8);
+        Canvas.SetTop(shine, 8);
+
+        var leaves = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 10,5.8 L 7.4,4 L 7.9,6.4 L 5,6.6 L 7.6,8 L 10,7.4 L 12.4,8 L 15,6.6 L 12.1,6.4 L 12.6,4 Z"),
+            Fill = green
+        };
+        var stem = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 10,6 L 10.8,2.4"),
+            Stroke = green,
+            StrokeThickness = 1.7,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round
+        };
+
+        var canvas = new Canvas { Width = 20, Height = 20 };
+        canvas.Children.Add(body);
+        canvas.Children.Add(shine);
+        canvas.Children.Add(stem);
+        canvas.Children.Add(leaves);
+
+        var scale = new ScaleTransform(1, 1);
+        pulse = scale;
+        return new Viewbox
+        {
+            Width = size,
+            Height = size,
+            Child = canvas,
+            RenderTransformOrigin = new System.Windows.Point(0.5, 0.5),
+            RenderTransform = scale
+        };
+    }
+
+    /// <summary>Work (Focus) = red tomato; rest (short or long break) = blue steaming cup.</summary>
+    private void SetPomodoroBreak(bool isBreak)
+    {
+        if (isBreak == _pomodoroIsBreak)
+        {
+            return;
+        }
+
+        _pomodoroIsBreak = isBreak;
+        CompactPomodoroRing.Stroke = isBreak ? PomodoroBreakBrush : PomodoroFocusBrush;
+        SetIconVisibility(_compactTomatoView, _compactCupView, isBreak);
+        SetIconVisibility(_idleTomatoView, _idleCupView, isBreak);
+        UpdatePomodoroAnimations();
+    }
+
+    private static void SetIconVisibility(FrameworkElement? tomato, FrameworkElement? cup, bool isBreak)
+    {
+        if (tomato is not null)
+        {
+            tomato.Visibility = isBreak ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        if (cup is not null)
+        {
+            cup.Visibility = isBreak ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>The tomato pulses during focus, the steam rises during breaks. Nothing runs when the timer is idle.</summary>
+    private void UpdatePomodoroAnimations()
+    {
+        var focus = _pomodoroActive && !_pomodoroIsBreak;
+        var rest = _pomodoroActive && _pomodoroIsBreak;
+        PulseTomato(_compactTomatoPulse, focus);
+        PulseTomato(_idleTomatoPulse, focus);
+        AnimateSteam(_compactSteam, rest);
+        AnimateSteam(_idleSteam, rest);
+    }
+
+    private static FrameworkElement CreateCupIcon(double size, out FrameworkElement[]? steam)
+    {
+        var cupBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEA, 0xF3, 0xFF));
+        var steamBrush = new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x8E, 0xC5, 0xFF));
+
+        var body = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 4,9 L 4,13.5 C 4,16 6,17.5 8.5,17.5 L 10.5,17.5 C 13,17.5 15,16 15,13.5 L 15,9 Z"),
+            Fill = cupBrush
+        };
+        var handle = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 15,10.2 C 18.2,10.2 18.2,14.8 15,14.8"),
+            Stroke = cupBrush,
+            StrokeThickness = 1.6,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round
+        };
+        var saucer = new System.Windows.Shapes.Path
+        {
+            Data = Geometry.Parse("M 3,19 L 16,19"),
+            Stroke = cupBrush,
+            StrokeThickness = 1.3,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round
+        };
+
+        var canvas = new Canvas { Width = 20, Height = 20 };
+        canvas.Children.Add(body);
+        canvas.Children.Add(handle);
+        canvas.Children.Add(saucer);
+
+        string[] steamShapes =
+        [
+            "M 6.5,7.5 C 5.3,6 7.7,4.8 6.5,3.2",
+            "M 9.5,7.5 C 8.3,6 10.7,4.8 9.5,3.2",
+            "M 12.5,7.5 C 11.3,6 13.7,4.8 12.5,3.2"
+        ];
+        var lines = new FrameworkElement[steamShapes.Length];
+        for (var i = 0; i < steamShapes.Length; i++)
+        {
+            lines[i] = new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse(steamShapes[i]),
+                Stroke = steamBrush,
+                StrokeThickness = 1.2,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                Opacity = 0.85,
+                RenderTransform = new TranslateTransform(0, 0)
+            };
+            canvas.Children.Add(lines[i]);
+        }
+
+        steam = lines;
+        return new Viewbox { Width = size, Height = size, Child = canvas };
+    }
+
+    /// <summary>Three wisps rise and fade one after another, like the spectrum bars bounce.</summary>
+    private static void AnimateSteam(FrameworkElement[]? steam, bool run)
+    {
+        if (steam is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < steam.Length; i++)
+        {
+            var line = steam[i];
+            if (line.RenderTransform is not TranslateTransform shift)
+            {
+                continue;
+            }
+
+            if (run)
+            {
+                var begin = TimeSpan.FromMilliseconds(i * 420);
+                var duration = TimeSpan.FromMilliseconds(1300);
+                shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation
+                {
+                    From = 1.5,
+                    To = -2.5,
+                    Duration = duration,
+                    BeginTime = begin,
+                    RepeatBehavior = RepeatBehavior.Forever
+                });
+
+                var fade = new DoubleAnimationUsingKeyFrames
+                {
+                    Duration = duration,
+                    BeginTime = begin,
+                    RepeatBehavior = RepeatBehavior.Forever
+                };
+                fade.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(0)));
+                fade.KeyFrames.Add(new LinearDoubleKeyFrame(0.95, KeyTime.FromPercent(0.4)));
+                fade.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromPercent(1)));
+                line.BeginAnimation(OpacityProperty, fade);
+            }
+            else
+            {
+                shift.BeginAnimation(TranslateTransform.YProperty, null);
+                line.BeginAnimation(OpacityProperty, null);
+                shift.Y = 0;
+                line.Opacity = 0.85;
+            }
+        }
+    }
+
+    private void SetPomodoroActive(bool active)
+    {
+        if (active == _pomodoroActive)
+        {
+            return;
+        }
+
+        _pomodoroActive = active;
+        CompactBatteryRingHost.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        CompactPomodoro.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        UpdatePomodoroAnimations();
+        if (!active)
+        {
+            _lastPomodoroFraction = -1;
+        }
+
+        if (_isIdleNotch)
+        {
+            RetargetIdleNotch();
+        }
+    }
+
+    /// <summary>A soft heartbeat, in the same spirit as the music spectrum. Only runs while the timer runs.</summary>
+    private static void PulseTomato(ScaleTransform? scale, bool run)
+    {
+        if (scale is null)
+        {
+            return;
+        }
+
+        if (run)
+        {
+            var pulse = new DoubleAnimation
+            {
+                From = 0.86,
+                To = 1.1,
+                Duration = TimeSpan.FromMilliseconds(650),
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, pulse);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, pulse);
+        }
+        else
+        {
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            scale.ScaleX = 1;
+            scale.ScaleY = 1;
+        }
+    }
+
+    /// <summary>Ring around the compact tomato: the share of the current phase that is still left.</summary>
+    private void SetPomodoroRing(double remainingFraction)
+    {
+        var progress = Math.Clamp(remainingFraction, 0, 1);
+        if (Math.Abs(progress - _lastPomodoroFraction) < 0.002)
+        {
+            return;
+        }
+
+        _lastPomodoroFraction = progress;
+        const double center = 11;
+        const double radius = 9.5;
+        if (progress <= 0.001)
+        {
+            CompactPomodoroRing.Data = null;
+            return;
+        }
+
+        if (progress >= 0.999)
+        {
+            CompactPomodoroRing.Data = new EllipseGeometry(new System.Windows.Point(center, center), radius, radius);
+            return;
+        }
+
+        var angle = progress * Math.PI * 2 - Math.PI / 2;
+        var end = new System.Windows.Point(center + radius * Math.Cos(angle), center + radius * Math.Sin(angle));
+        var figure = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(center, center - radius),
+            Segments =
+            [
+                new ArcSegment(end, new System.Windows.Size(radius, radius), 0, progress > 0.5,
+                    SweepDirection.Clockwise, true)
+            ]
+        };
+        CompactPomodoroRing.Data = new PathGeometry([figure]);
+    }
+
+    // ---- mode selector (Focus / Short / Long) + one row of duration chips for the selected mode ----
+
+    private static int[] PresetsFor(PomodoroPhase phase) => phase switch
+    {
+        PomodoroPhase.ShortBreak => ShortBreakPresets,
+        PomodoroPhase.LongBreak => LongBreakPresets,
+        _ => FocusPresets
+    };
+
+    private static int MinutesFor(PomodoroState state, PomodoroPhase phase) => phase switch
+    {
+        PomodoroPhase.ShortBreak => state.ShortBreakMinutes,
+        PomodoroPhase.LongBreak => state.LongBreakMinutes,
+        _ => state.FocusMinutes
+    };
+
+    private void RebuildDurationChips(PomodoroPhase phase)
+    {
+        DurationChips.Children.Clear();
+        var style = (Style)FindResource("DurationChipStyle");
+        foreach (var minutes in PresetsFor(phase))
+        {
+            var chip = new System.Windows.Controls.Primitives.ToggleButton
+            {
+                Content = minutes.ToString(),
+                Style = style,
+                Tag = new DurationPick(phase, minutes),
+                ToolTip = $"{minutes} minutes"
+            };
+            chip.Click += DurationChip_Click;
+            DurationChips.Children.Add(chip);
+        }
+
+        _chipsPhase = phase;
+    }
+
+    private void PhaseButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton { Tag: string tag }
+            || !Enum.TryParse<PomodoroPhase>(tag, out var phase))
+        {
+            return;
+        }
+
+        _pomodoroNotice = null;
+        _pomodoroService.SelectPhase(phase);
+        _durationChipSignature = string.Empty; // re-sync the toggle state even if the phase did not change
+        RefreshPomodoro();
+    }
+
+    private void DurationChip_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Primitives.ToggleButton { Tag: DurationPick pick })
+        {
+            return;
+        }
+
+        _pomodoroService.SetDuration(pick.Phase, pick.Minutes);
+        _durationChipSignature = string.Empty; // force the chips to re-sync with the saved values
+        RefreshPomodoro();
+    }
+
+    private void RefreshDurationChips(PomodoroState state)
+    {
+        if (_chipsPhase != state.Phase)
+        {
+            RebuildDurationChips(state.Phase);
+            _durationChipSignature = string.Empty;
+        }
+
+        var minutes = MinutesFor(state, state.Phase);
+        var signature = $"{state.Phase}/{minutes}/{state.IsRunning}";
+        if (signature == _durationChipSignature)
+        {
+            return;
+        }
+
+        _durationChipSignature = signature;
+        PhaseFocusButton.IsChecked = state.Phase == PomodoroPhase.Focus;
+        PhaseShortButton.IsChecked = state.Phase == PomodoroPhase.ShortBreak;
+        PhaseLongButton.IsChecked = state.Phase == PomodoroPhase.LongBreak;
+
+        // Mode and length can only be changed while the timer is not running.
+        var editable = !state.IsRunning;
+        PhaseFocusButton.IsEnabled = editable;
+        PhaseShortButton.IsEnabled = editable;
+        PhaseLongButton.IsEnabled = editable;
+        foreach (var child in DurationChips.Children)
+        {
+            if (child is System.Windows.Controls.Primitives.ToggleButton { Tag: DurationPick pick } chip)
+            {
+                chip.IsChecked = pick.Minutes == minutes;
+                chip.IsEnabled = editable;
+            }
+        }
+    }
+
+    // ---- focus mode: hold Windows notifications during a running focus session ----
+
+    private bool IsFocusModeActive()
+    {
+        var state = _pomodoroService.State;
+        return state.FocusModeEnabled && state.IsRunning && state.Phase == PomodoroPhase.Focus;
+    }
+
+    private void FocusModeSwitch_Click(object sender, RoutedEventArgs e)
+    {
+        _pomodoroService.SetFocusMode(FocusModeSwitch.IsChecked == true);
+        RefreshPomodoro();
+    }
+
+    private void HoldNotification(string appName)
+    {
+        if (_heldNotificationApps.Count >= 200)
+        {
+            _heldNotificationApps.RemoveAt(0);
+        }
+
+        _heldNotificationApps.Add(string.IsNullOrWhiteSpace(appName) ? "App" : appName);
+    }
+
+    /// <summary>When focus mode stops holding (break, pause, reset or switched off), show one summary.</summary>
+    private void UpdateFocusMode()
+    {
+        var active = IsFocusModeActive();
+        if (_focusModeHolding && !active)
+        {
+            FlushHeldNotifications();
+        }
+
+        _focusModeHolding = active;
+    }
+
+    private void FlushHeldNotifications()
+    {
+        var count = _heldNotificationApps.Count;
+        if (count == 0)
+        {
+            return;
+        }
+
+        var groups = _heldNotificationApps
+            .GroupBy(app => app)
+            .OrderByDescending(group => group.Count())
+            .ToList();
+        var shown = groups.Take(3)
+            .Select(group => group.Count() > 1 ? $"{group.Key} ×{group.Count()}" : group.Key);
+        var summary = string.Join(", ", shown) + (groups.Count > 3 ? $" +{groups.Count - 3}" : string.Empty);
+        _heldNotificationApps.Clear();
+        ShowNodeNotification("Focus mode", $"{count} held · {summary}", TimeSpan.FromSeconds(5));
     }
 
     private void PomodoroResetButton_Click(object sender, RoutedEventArgs e)

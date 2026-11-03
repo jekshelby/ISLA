@@ -12,7 +12,7 @@ namespace ISLAInstaller;
 
 public partial class MainWindow : Window
 {
-    private const string AppVersion = "1.0.0";
+    private const string AppVersion = "1.2.1";
     private const string Publisher = "ISLA Development";
     private const string UninstallRegistryKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\ISLA";
 
@@ -128,7 +128,7 @@ public partial class MainWindow : Window
             });
 
             TitleText.Text = "ISLA installed";
-            DescriptionText.Text = "ISLA 1.0 was installed successfully.";
+            DescriptionText.Text = "ISLA 1.2.1 was installed successfully.";
             StatusText.Text = "Find ISLA in the Start Menu or Windows Search. It is also listed under Settings > Apps.";
             InstallProgress.Visibility = Visibility.Collapsed;
             LaunchCheck.Visibility = Visibility.Visible;
