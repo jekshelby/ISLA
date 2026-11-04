@@ -34,12 +34,19 @@ public partial class MainWindow : Window
 
     // ---- Island geometry -------------------------------------------------------------
     // Single source of truth. MainWindow.xaml mirrors the initial sizes:
-    // IslandSurface 180x30, CompactContent 170, NodeNotificationContent 298.
+    // IslandSurface 180x30, CompactContent 170, NodeNotificationContent 160.
     private const double CompactWidth = 180;
     private const double CompactHeight = 30;
-    private const double NotificationWidth = 306;
+    // Notification pill: starts at the compact width and grows with the text, but never
+    // wider than ~20% more than the old fixed banner (306 px).
+    private const double NotificationMinWidth = CompactWidth;
+    private const double NotificationMaxWidth = 368;
+    private const double NotificationHorizontalPadding = 10;
+    private const double NotificationIconSize = 18;
+    private const double NotificationIconGap = 7;
+    private const double NotificationTextGap = 7;
+    private const double NotificationAppMaxWidth = 150;
     private const double CompactHorizontalPadding = 5;
-    private const double NotificationHorizontalPadding = 4;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     // Wider notch used while media plays: clock on the left, spectrum on the right.
     private const double IdleMusicNotchWidth = 82;
@@ -163,7 +170,7 @@ public partial class MainWindow : Window
     private double _idleNotchWidth = IdleNotchWidth;
 
     // Notification queue: nothing is dropped or overwritten any more.
-    private sealed record QueuedNotification(string App, string Message, TimeSpan Duration, DateTime QueuedUtc);
+    private sealed record QueuedNotification(string App, string Message, byte[]? Icon, TimeSpan Duration, DateTime QueuedUtc);
     private readonly Queue<QueuedNotification> _notificationQueue = new();
     private bool _nodeNotificationActive;
     private DateTime _nodeNotificationShownUtc;
@@ -181,6 +188,7 @@ public partial class MainWindow : Window
     private int _coverAttempts;
     private bool _coverLoaded;
     private bool _coverLoading;
+    private System.Windows.Media.ImageSource? _islaNotificationIcon;
 
     // Wi-Fi / Bluetooth detail panel
     private readonly WirelessListService _wirelessService = new();
@@ -290,7 +298,7 @@ public partial class MainWindow : Window
     {
         var message = string.IsNullOrWhiteSpace(notification.Body)
             ? notification.Title
-            : $"{notification.Title} — {notification.Body}";
+            : $"{notification.Title}: {notification.Body}";
         Dispatcher.BeginInvoke(() =>
         {
             if (IsFocusModeActive())
@@ -299,7 +307,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            ShowNodeNotification(notification.AppName, message, TimeSpan.FromSeconds(4));
+            ShowNodeNotification(notification.AppName, message, TimeSpan.FromSeconds(4), icon: notification.Icon);
         });
     }
 
@@ -1241,7 +1249,7 @@ public partial class MainWindow : Window
     /// notifications are merged. <paramref name="dropIfExpanded"/> is for things the person can
     /// already see in the open panel (their own Wi-Fi toggle, Caps Lock...).
     /// </summary>
-    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null, bool dropIfExpanded = false)
+    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null, bool dropIfExpanded = false, byte[]? icon = null)
     {
         if (dropIfExpanded && _isExpanded)
         {
@@ -1262,7 +1270,7 @@ public partial class MainWindow : Window
         }
 
         _notificationQueue.Enqueue(new QueuedNotification(
-            appName, message, duration ?? TimeSpan.FromSeconds(2.4), DateTime.UtcNow));
+            appName, message, icon, duration ?? TimeSpan.FromSeconds(2.4), DateTime.UtcNow));
 
         if (_nodeNotificationActive)
         {
@@ -1316,11 +1324,18 @@ public partial class MainWindow : Window
         _lastInteractionUtc = DateTime.UtcNow;
         _nodeNotificationActive = true;
         _nodeNotificationShownUtc = DateTime.UtcNow;
+
+        var hasMessage = !string.IsNullOrWhiteSpace(notification.Message);
         NodeNotificationAppText.Text = notification.App;
         NodeNotificationText.Text = notification.Message;
-        NodeNotificationText.Visibility = string.IsNullOrEmpty(notification.Message) ? Visibility.Collapsed : Visibility.Visible;
+        NodeNotificationText.Visibility = hasMessage ? Visibility.Visible : Visibility.Collapsed;
+        ApplyNotificationIcon(notification.Icon, notification.App);
+
+        var targetWidth = GetNotificationWidth(notification.App, hasMessage ? notification.Message : string.Empty);
+        var contentWidth = targetWidth - (NotificationHorizontalPadding * 2);
+        NodeNotificationContent.Width = contentWidth;
+        CompactContent.Width = contentWidth;
         IslandSurface.Padding = new Thickness(NotificationHorizontalPadding, 0, NotificationHorizontalPadding, 0);
-        CompactContent.Width = NotificationWidth - (NotificationHorizontalPadding * 2);
         CompactContent.Visibility = Visibility.Visible;
         NodeNotificationContent.Visibility = Visibility.Visible;
         NodeNotificationContent.Opacity = 0;
@@ -1329,27 +1344,187 @@ public partial class MainWindow : Window
         _nodeNotificationUntil = DateTime.UtcNow.Add(notification.Duration);
         _nodeNotificationTimer.Start();
 
+        // Only the width animates: the pill stays 30 px tall and the content stays on one line.
         var animation = new DoubleAnimation
         {
             From = IslandSurface.Width,
-            To = Math.Max(IslandSurface.Width, NotificationWidth),
+            To = targetWidth,
             Duration = TimeSpan.FromMilliseconds(180),
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
             FillBehavior = FillBehavior.Stop
         };
-        animation.Completed += (_, _) => IslandSurface.Width = NotificationWidth;
+        animation.Completed += (_, _) => IslandSurface.Width = targetWidth;
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
-        var heightAnimation = new DoubleAnimation
-        {
-            From = IslandSurface.Height,
-            To = 58,
-            Duration = TimeSpan.FromMilliseconds(180),
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        heightAnimation.Completed += (_, _) => IslandSurface.Height = 58;
-        IslandSurface.BeginAnimation(FrameworkElement.HeightProperty, heightAnimation, HandoffBehavior.SnapshotAndReplace);
         NodeNotificationContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140)));
+    }
+
+    /// <summary>
+    /// Measures the real text so the pill only takes the room it needs: compact width as the
+    /// minimum, ~20% above the old banner width as the maximum. Long messages are trimmed.
+    /// </summary>
+    private double GetNotificationWidth(string app, string message)
+    {
+        var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var maxContent = NotificationMaxWidth - (NotificationHorizontalPadding * 2);
+
+        var appWidth = Math.Min(
+            MeasureNotificationText(app, NodeNotificationAppText, pixelsPerDip),
+            NotificationAppMaxWidth);
+        NodeNotificationAppText.MaxWidth = NotificationAppMaxWidth;
+
+        var textGap = string.IsNullOrEmpty(message) ? 0 : NotificationTextGap;
+        var availableForMessage = Math.Max(
+            0,
+            maxContent - NotificationIconSize - NotificationIconGap - appWidth - textGap);
+        var messageWidth = Math.Min(
+            MeasureNotificationText(message, NodeNotificationText, pixelsPerDip),
+            availableForMessage);
+        NodeNotificationText.MaxWidth = Math.Max(0, availableForMessage);
+
+        var content = NotificationIconSize + NotificationIconGap + appWidth + textGap + messageWidth;
+        return Math.Clamp(
+            content + (NotificationHorizontalPadding * 2),
+            NotificationMinWidth,
+            NotificationMaxWidth);
+    }
+
+    private static double MeasureNotificationText(string text, TextBlock reference, double pixelsPerDip)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return 0;
+        }
+
+        var typeface = new Typeface(
+            reference.FontFamily,
+            reference.FontStyle,
+            reference.FontWeight,
+            reference.FontStretch);
+        var formatted = new FormattedText(
+            text,
+            System.Globalization.CultureInfo.CurrentUICulture,
+            System.Windows.FlowDirection.LeftToRight,
+            typeface,
+            reference.FontSize,
+            reference.Foreground,
+            pixelsPerDip);
+        return formatted.WidthIncludingTrailingWhitespace;
+    }
+
+    /// <summary>App logo in a circle, or a coloured initial when Windows cannot provide one.</summary>
+    private void ApplyNotificationIcon(byte[]? iconBytes, string appName)
+    {
+        if (iconBytes is { Length: > 0 })
+        {
+            try
+            {
+                using var stream = new MemoryStream(iconBytes);
+                var image = new System.Windows.Media.Imaging.BitmapImage();
+                image.BeginInit();
+                image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                image.DecodePixelWidth = (int)(NotificationIconSize * 2);
+                image.StreamSource = stream;
+                image.EndInit();
+                image.Freeze();
+                ShowNotificationIcon(image);
+                return;
+            }
+            catch (Exception exception) when (exception is NotSupportedException or IOException or
+                                               ArgumentException or FormatException)
+            {
+                // Fall back to the initial below.
+            }
+        }
+
+        // ISLA's own banners (Caps Lock, battery, Wi-Fi...) use the app icon.
+        if (string.Equals(appName, "ISLA", StringComparison.OrdinalIgnoreCase) &&
+            GetIslaNotificationIcon() is { } ownIcon)
+        {
+            ShowNotificationIcon(ownIcon);
+            return;
+        }
+
+        NodeNotificationIconImage.Source = null;
+        NodeNotificationIconImage.Visibility = Visibility.Collapsed;
+        NodeNotificationIconLetter.Text = GetAppInitial(appName);
+        NodeNotificationIconLetter.Visibility = Visibility.Visible;
+        NodeNotificationIconBackground.Fill = PickNotificationIconBrush(appName);
+    }
+
+    private static readonly System.Windows.Media.Brush NotificationIconNeutralBrush =
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x3A, 0x3A, 0x40)));
+
+    /// <summary>Fallback circle colours for apps without an accessible logo.</summary>
+    private static readonly System.Windows.Media.Brush[] NotificationIconBrushes =
+    [
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x58, 0x65, 0xF2))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x1D, 0xB9, 0x54))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0x6B, 0x4A))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x4D, 0xA3, 0xFF))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xA8, 0x55, 0xF7))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xF5, 0x9E, 0x0B))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0x14, 0xB8, 0xA6))),
+        Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xEC, 0x48, 0x99)))
+    ];
+
+    private void ShowNotificationIcon(System.Windows.Media.ImageSource image)
+    {
+        NodeNotificationIconImage.Source = image;
+        NodeNotificationIconImage.Visibility = Visibility.Visible;
+        NodeNotificationIconLetter.Visibility = Visibility.Collapsed;
+        // Transparent corners of the logo show the neutral circle, not the previous app colour.
+        NodeNotificationIconBackground.Fill = NotificationIconNeutralBrush;
+    }
+
+    private System.Windows.Media.ImageSource? GetIslaNotificationIcon()
+    {
+        if (_islaNotificationIcon is not null)
+        {
+            return _islaNotificationIcon;
+        }
+
+        try
+        {
+            var image = new System.Windows.Media.Imaging.BitmapImage();
+            image.BeginInit();
+            image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            image.DecodePixelWidth = (int)(NotificationIconSize * 2);
+            image.UriSource = new Uri(Path.Combine(AppContext.BaseDirectory, "Icon.png"), UriKind.Absolute);
+            image.EndInit();
+            image.Freeze();
+            _islaNotificationIcon = image;
+        }
+        catch (Exception exception) when (exception is IOException or NotSupportedException or
+                                           ArgumentException or FormatException)
+        {
+            return null;
+        }
+
+        return _islaNotificationIcon;
+    }
+
+    private static string GetAppInitial(string appName)
+    {
+        foreach (var character in appName)
+        {
+            if (char.IsLetterOrDigit(character))
+            {
+                return char.ToUpperInvariant(character).ToString();
+            }
+        }
+
+        return "•";
+    }
+
+    private static System.Windows.Media.Brush PickNotificationIconBrush(string appName)
+    {
+        var hash = 0;
+        foreach (var character in appName)
+        {
+            hash = ((hash * 31) + character) & 0x7FFFFFFF;
+        }
+
+        return NotificationIconBrushes[hash % NotificationIconBrushes.Length];
     }
 
     private void NodeNotificationTimer_Tick(object? sender, EventArgs e)
@@ -1401,16 +1576,6 @@ public partial class MainWindow : Window
         };
         animation.Completed += (_, _) => IslandSurface.Width = CompactWidth;
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
-        var heightAnimation = new DoubleAnimation
-        {
-            From = IslandSurface.Height,
-            To = CompactHeight,
-            Duration = TimeSpan.FromMilliseconds(180),
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        heightAnimation.Completed += (_, _) => IslandSurface.Height = CompactHeight;
-        IslandSurface.BeginAnimation(FrameworkElement.HeightProperty, heightAnimation, HandoffBehavior.SnapshotAndReplace);
     }
 
     private async void MediaRefreshTimer_Tick(object? sender, EventArgs e)

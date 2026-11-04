@@ -136,25 +136,49 @@
                         <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.7" /></Rectangle.RenderTransform></Rectangle>
                         <Rectangle Width="1.6" Height="9" RadiusX="0.8" RadiusY="0.8" Margin="0.8,0" Fill="{StaticResource IslandText}" RenderTransformOrigin="0.5,0.5"><Rectangle.RenderTransform><ScaleTransform ScaleY="0.4" /></Rectangle.RenderTransform></Rectangle>
                     </StackPanel>
+                    <!-- Single row while a notification is shown: icon | app name | message.
+                         The island only grows wider (never taller); widths are set from code. -->
                     <Grid x:Name="NodeNotificationContent"
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
                           VerticalAlignment="Center"
-                          Width="298">
-                        <StackPanel HorizontalAlignment="Stretch">
+                          Width="160">
+                        <StackPanel Orientation="Horizontal"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center">
+                            <Grid x:Name="NodeNotificationIconHost"
+                                  Width="18"
+                                  Height="18"
+                                  VerticalAlignment="Center">
+                                <Ellipse x:Name="NodeNotificationIconBackground" Fill="#3A3A40" />
+                                <Image x:Name="NodeNotificationIconImage"
+                                       Stretch="UniformToFill"
+                                       Visibility="Collapsed">
+                                    <Image.Clip>
+                                        <EllipseGeometry Center="9,9" RadiusX="9" RadiusY="9" />
+                                    </Image.Clip>
+                                </Image>
+                                <TextBlock x:Name="NodeNotificationIconLetter"
+                                           FontSize="9.5"
+                                           FontWeight="Bold"
+                                           Foreground="{StaticResource IslandText}"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Grid>
                             <TextBlock x:Name="NodeNotificationAppText"
                                        Style="{StaticResource ContentSubtitleStyle}"
                                        Foreground="{StaticResource IslandText}"
-                                       FontSize="13"
+                                       FontSize="12.5"
                                        FontWeight="Bold"
-                                       TextAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Margin="7,0,0,0"
                                        TextTrimming="CharacterEllipsis" />
                             <TextBlock x:Name="NodeNotificationText"
                                        Style="{StaticResource ContentSubtitleStyle}"
                                        FontSize="11.5"
                                        FontWeight="SemiBold"
-                                       Margin="0,2,0,0"
-                                       TextAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Margin="7,0,0,0"
                                        TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                     </Grid>

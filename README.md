@@ -2,7 +2,7 @@
 
 ISLA is a Windows desktop Dynamic Island companion built with C# and WPF.
 
-## Release 1.3.0
+## Release 1.3.1
 
 ISLA shows a compact, always-on-top island at the top centre of the desktop. It
 expands on hover and provides media, quick settings, Pomodoro, and Windows
@@ -18,8 +18,10 @@ notification controls.
   Wi-Fi scanning/connecting and paired Bluetooth device details.
 - Pomodoro timer with focus, short-break, and long-break phases, duration
   presets, a progress ring, and an optional focus mode that holds notifications.
-- Windows notification capture for apps such as Discord and Snipping Tool, with
-  a queue, previews on the island, and focus-mode holding.
+- Windows notification capture for apps such as Discord and Snipping Tool. Banners
+  stay one line tall: app icon in a circle, app name, then the message. The pill
+  only grows wider (up to 20% past the old banner width) and trims long text; the
+  queue and focus-mode holding are unchanged.
 - Battery status, charging indicator, clock, Caps Lock state, and an idle notch
   with battery edge, media spectrum, and Pomodoro indicators.
 - Tray icon with Show ISLA, Start with Windows, notification permission, test

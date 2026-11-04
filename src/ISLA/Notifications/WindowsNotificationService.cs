@@ -1,9 +1,10 @@
 using Windows.UI.Notifications;
 using Windows.UI.Notifications.Management;
+using ISLA.Infrastructure;
 
 namespace ISLA.Notifications;
 
-public sealed record WindowsNotification(string AppName, string Title, string Body);
+public sealed record WindowsNotification(string AppName, string Title, string Body, byte[]? Icon = null);
 
 public sealed class WindowsNotificationService : IDisposable
 {
@@ -166,7 +167,7 @@ public sealed class WindowsNotificationService : IDisposable
 
                     try
                     {
-                        Publish(notification);
+                        await PublishAsync(notification);
                     }
                     catch (Exception ex)
                     {
@@ -203,7 +204,7 @@ public sealed class WindowsNotificationService : IDisposable
         }
     }
 
-    private void Publish(UserNotification notification)
+    private async Task PublishAsync(UserNotification notification)
     {
         var binding = notification.Notification.Visual.GetBinding(KnownNotificationBindings.ToastGeneric);
         if (binding is null)
@@ -223,7 +224,8 @@ public sealed class WindowsNotificationService : IDisposable
         var appName = notification.AppInfo.DisplayInfo.DisplayName;
         var title = text[0] ?? appName;
         var body = string.Join(" ", text.Skip(1));
-        NotificationReceived?.Invoke(this, new WindowsNotification(appName, title, body));
+        var icon = await AppIconResolver.TryGetIconAsync(notification.AppInfo, appName);
+        NotificationReceived?.Invoke(this, new WindowsNotification(appName, title, body, icon));
     }
 
     public void Dispose()
