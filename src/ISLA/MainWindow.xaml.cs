@@ -18,8 +18,15 @@ using ISLA.Media;
 using ISLA.Notifications;
 using ISLA.Pomodoro;
 using ISLA.QuickSettings;
+using ISLA.Reminders;
 using ISLA.Settings;
 using ISLA.Weather;
+using Button = System.Windows.Controls.Button;
+using Brush = System.Windows.Media.Brush;
+using FontFamily = System.Windows.Media.FontFamily;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using Orientation = System.Windows.Controls.Orientation;
 
 namespace ISLA;
 
@@ -68,6 +75,7 @@ public partial class MainWindow : Window
     private const double MediaHeight = 252;
     private const double TimerHeight = 252;
     private const double WeatherHeight = 252;
+    private const double CalendarHeight = 252;
     private const double SettingsHeight = MediaHeight;
     private const double ExpandedContentHeight = 252;
     private const double CompactRadius = 15;
@@ -130,9 +138,11 @@ public partial class MainWindow : Window
     private readonly PomodoroService _pomodoroService = new();
     private readonly AppSettingsService _settingsService = new();
     private readonly WeatherService _weatherService;
+    private readonly ReminderService _reminderService = new();
     private readonly DispatcherTimer _settingsRefreshTimer;
     private readonly DispatcherTimer _pomodoroTimer;
     private readonly DispatcherTimer _weatherRefreshTimer;
+    private readonly DispatcherTimer _reminderTimer;
     private readonly DispatcherTimer _systemStateTimer;
     private readonly DispatcherTimer _nodeNotificationTimer;
     private readonly DispatcherTimer _idleTimer;
@@ -189,13 +199,27 @@ public partial class MainWindow : Window
     private double _idleNotchWidth = IdleNotchWidth;
 
     // Notification queue: nothing is dropped or overwritten any more.
-    private sealed record QueuedNotification(string App, string Message, byte[]? Icon, TimeSpan Duration, DateTime QueuedUtc);
+    private sealed record QueuedNotification(
+        string App,
+        string Message,
+        byte[]? Icon,
+        TimeSpan Duration,
+        DateTime QueuedUtc,
+        string? ReminderId = null,
+        bool Persistent = false);
+
     private readonly Queue<QueuedNotification> _notificationQueue = new();
+    private QueuedNotification? _activeNotification;
     private bool _nodeNotificationActive;
     private DateTime _nodeNotificationShownUtc;
     private const int MaxQueuedNotifications = 8;
     private static readonly TimeSpan MinNotificationTime = TimeSpan.FromMilliseconds(1600);
     private static readonly TimeSpan NotificationMaxAge = TimeSpan.FromMinutes(2);
+
+    // Calendar: month shown in the grid and the day whose reminders are listed.
+    private DateTime _calendarMonth = new(DateTime.Today.Year, DateTime.Today.Month, 1);
+    private DateTime _selectedCalendarDate = DateTime.Today;
+    private string _calendarDueSignature = string.Empty;
 
     // Media: event-driven refresh, seeking, album art
     private readonly MediaWatcher _mediaWatcher = new();
@@ -270,6 +294,8 @@ public partial class MainWindow : Window
         _settingsRefreshTimer.Tick += SettingsRefreshTimer_Tick;
         _weatherRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
         _weatherRefreshTimer.Tick += WeatherRefreshTimer_Tick;
+        _reminderTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _reminderTimer.Tick += ReminderTimer_Tick;
         _pomodoroTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _pomodoroTimer.Tick += PomodoroTimer_Tick;
         _systemStateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -289,6 +315,8 @@ public partial class MainWindow : Window
         _mediaRefreshTimer.Start();
         _settingsRefreshTimer.Start();
         _weatherRefreshTimer.Start();
+        _reminderTimer.Start();
+        EnqueueDueReminders();
         _systemStateTimer.Start();
         _lastInteractionUtc = DateTime.UtcNow;
         _idleTimer.Start();
@@ -535,6 +563,419 @@ public partial class MainWindow : Window
 
     private Geometry? FindWeatherIcon(string key) =>
         TryFindResource($"WeatherIcon{key}") as Geometry;
+
+    // =================================================================================
+    //  Calendar / reminders
+    // =================================================================================
+
+    private void ReminderTimer_Tick(object? sender, EventArgs e)
+    {
+        EnqueueDueReminders();
+
+        if (!_isExpanded || _activeTab != "Calendar")
+        {
+            return;
+        }
+
+        var signature = string.Join(
+            ",",
+            _reminderService.DueUnacknowledged(DateTime.Now).Select(reminder => reminder.Id));
+        if (signature != _calendarDueSignature)
+        {
+            _calendarDueSignature = signature;
+            RefreshCalendarUi();
+        }
+    }
+
+    private void EnqueueDueReminders()
+    {
+        foreach (var reminder in _reminderService.DueUnacknowledged(DateTime.Now))
+        {
+            QueueReminderNotification(reminder);
+        }
+    }
+
+    /// <summary>A due reminder is persistent: it stays on the island until acknowledged here.</summary>
+    private void QueueReminderNotification(Reminder reminder) =>
+        ShowNodeNotification(
+            "Reminder",
+            reminder.Title,
+            TimeSpan.FromSeconds(2.4),
+            icon: null,
+            reminderId: reminder.Id,
+            persistent: true);
+
+    private void RemoveQueuedReminder(string reminderId)
+    {
+        if (_notificationQueue.Count == 0)
+        {
+            return;
+        }
+
+        var keep = _notificationQueue.Where(item => item.ReminderId != reminderId).ToArray();
+        _notificationQueue.Clear();
+        foreach (var item in keep)
+        {
+            _notificationQueue.Enqueue(item);
+        }
+    }
+
+    private void CalendarPrevMonth_Click(object sender, RoutedEventArgs e) => SelectCalendarMonth(-1);
+
+    private void CalendarNextMonth_Click(object sender, RoutedEventArgs e) => SelectCalendarMonth(1);
+
+    private void SelectCalendarMonth(int delta)
+    {
+        _calendarMonth = _calendarMonth.AddMonths(delta);
+        var day = Math.Min(
+            _selectedCalendarDate.Day,
+            DateTime.DaysInMonth(_calendarMonth.Year, _calendarMonth.Month));
+        _selectedCalendarDate = new DateTime(_calendarMonth.Year, _calendarMonth.Month, day);
+        CalendarStatusText.Text = string.Empty;
+        RefreshCalendarUi();
+    }
+
+    private void CalendarDay_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.Button { Tag: DateTime date })
+        {
+            return;
+        }
+
+        _selectedCalendarDate = date;
+        CalendarStatusText.Text = string.Empty;
+        RefreshCalendarUi();
+    }
+
+    private void CalendarAdd_Click(object sender, RoutedEventArgs e) => AddCalendarReminder();
+
+    private void CalendarTitleBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        AddCalendarReminder();
+        e.Handled = true;
+    }
+
+    private void AddCalendarReminder()
+    {
+        var title = CalendarTitleBox.Text.Trim();
+        if (title.Length == 0)
+        {
+            CalendarStatusText.Text = "Enter a reminder title first.";
+            CalendarTitleBox.Focus();
+            return;
+        }
+
+        if (!TryParseReminderTime(CalendarTimeBox.Text, out var time))
+        {
+            CalendarStatusText.Text = "Use a 24-hour time such as 09:30.";
+            CalendarTimeBox.Focus();
+            CalendarTimeBox.SelectAll();
+            return;
+        }
+
+        var dueAt = _selectedCalendarDate.Date + time;
+        var reminder = _reminderService.Add(title, dueAt);
+        CalendarTitleBox.Text = string.Empty;
+        CalendarStatusText.Text = dueAt <= DateTime.Now
+            ? "Reminder added and due now."
+            : $"Reminder set for {dueAt:ddd, d MMM 'at' HH:mm}.";
+        RefreshCalendarUi();
+        if (dueAt <= DateTime.Now)
+        {
+            QueueReminderNotification(reminder);
+        }
+
+        CalendarTitleBox.Focus();
+    }
+
+    private static bool TryParseReminderTime(string text, out TimeSpan time) =>
+        TimeSpan.TryParseExact(
+            text.Trim(),
+            [@"h\:mm", @"hh\:mm"],
+            System.Globalization.CultureInfo.InvariantCulture,
+            out time) &&
+        time >= TimeSpan.Zero &&
+        time < TimeSpan.FromDays(1);
+
+    private void AcknowledgeReminder(string reminderId)
+    {
+        if (!_reminderService.Acknowledge(reminderId))
+        {
+            return;
+        }
+
+        RemoveQueuedReminder(reminderId);
+        if (_activeNotification?.ReminderId == reminderId)
+        {
+            EndActiveNotification(restoreSize: !_isExpanded);
+            if (!_isExpanded)
+            {
+                TryShowNextNotification();
+            }
+        }
+
+        CalendarStatusText.Text = "Reminder acknowledged.";
+        RefreshCalendarUi();
+    }
+
+    private void DeleteReminder(string reminderId)
+    {
+        var reminder = _reminderService.Get(reminderId);
+        if (reminder is null)
+        {
+            return;
+        }
+
+        if (!reminder.Acknowledged && reminder.DueAt <= DateTime.Now)
+        {
+            CalendarStatusText.Text = "Acknowledge this reminder to dismiss it.";
+            return;
+        }
+
+        _reminderService.Delete(reminderId);
+        RemoveQueuedReminder(reminderId);
+        if (_activeNotification?.ReminderId == reminderId)
+        {
+            EndActiveNotification(restoreSize: !_isExpanded);
+            if (!_isExpanded)
+            {
+                TryShowNextNotification();
+            }
+        }
+
+        CalendarStatusText.Text = "Reminder deleted.";
+        RefreshCalendarUi();
+    }
+
+    private void RefreshCalendarUi()
+    {
+        CalendarMonthText.Text = _calendarMonth.ToString("MMMM yyyy", System.Globalization.CultureInfo.CurrentCulture);
+        CalendarSelectedDateText.Text = _selectedCalendarDate.ToString(
+            "ddd, d MMM",
+            System.Globalization.CultureInfo.CurrentCulture);
+
+        BuildCalendarDays();
+        BuildCalendarReminderList();
+        _calendarDueSignature = string.Join(
+            ",",
+            _reminderService.DueUnacknowledged(DateTime.Now).Select(reminder => reminder.Id));
+
+        if (string.IsNullOrWhiteSpace(CalendarStatusText.Text))
+        {
+            CalendarStatusText.Text = "Pick a day, then add a title and time.";
+        }
+    }
+
+    private void BuildCalendarDays()
+    {
+        CalendarDayGrid.Children.Clear();
+
+        var first = new DateTime(_calendarMonth.Year, _calendarMonth.Month, 1);
+        // Monday-first grid: Sunday (0) becomes slot 6.
+        var offset = ((int)first.DayOfWeek + 6) % 7;
+        var days = DateTime.DaysInMonth(first.Year, first.Month);
+
+        for (var index = 0; index < offset; index++)
+        {
+            CalendarDayGrid.Children.Add(new Border());
+        }
+
+        for (var day = 1; day <= days; day++)
+        {
+            var date = new DateTime(first.Year, first.Month, day);
+            var isSelected = date == _selectedCalendarDate.Date;
+            var isToday = date == DateTime.Today;
+            var hasPending = _reminderService.ForDate(date).Any(reminder => !reminder.Acknowledged);
+
+            var button = new System.Windows.Controls.Button
+            {
+                Style = (Style)FindResource("CalendarDayButtonStyle"),
+                Tag = date,
+                Content = BuildCalendarDayContent(day, hasPending, isSelected, isToday),
+                Background = isSelected
+                    ? (Brush)FindResource("IslandAccent")
+                    : System.Windows.Media.Brushes.Transparent,
+                ToolTip = hasPending ? "Has pending reminders" : null
+            };
+            button.Click += CalendarDay_Click;
+            CalendarDayGrid.Children.Add(button);
+        }
+
+        var used = offset + days;
+        for (var index = used; index < 42; index++)
+        {
+            CalendarDayGrid.Children.Add(new Border());
+        }
+    }
+
+    private FrameworkElement BuildCalendarDayContent(int day, bool hasPending, bool isSelected, bool isToday)
+    {
+        var grid = new Grid();
+
+        var label = new TextBlock
+        {
+            Text = day.ToString(System.Globalization.CultureInfo.CurrentCulture),
+            FontFamily = (FontFamily)FindResource("UiFont"),
+            FontSize = 10.5,
+            FontWeight = FontWeights.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = isSelected
+                ? (Brush)FindResource("IslandBackground")
+                : isToday
+                    ? (Brush)FindResource("IslandAccent")
+                    : (Brush)FindResource("IslandTextSecondary")
+        };
+        grid.Children.Add(label);
+
+        if (hasPending)
+        {
+            grid.Children.Add(new System.Windows.Shapes.Ellipse
+            {
+                Width = 3,
+                Height = 3,
+                Fill = isSelected
+                    ? (Brush)FindResource("IslandBackground")
+                    : (Brush)FindResource("IslandAccent"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 1.5),
+                IsHitTestVisible = false
+            });
+        }
+
+        return grid;
+    }
+
+    private void BuildCalendarReminderList()
+    {
+        CalendarReminderList.Children.Clear();
+
+        var reminders = _reminderService.ForDate(_selectedCalendarDate).ToList();
+        var pending = reminders.Count(reminder => !reminder.Acknowledged);
+        CalendarReminderCountText.Text = reminders.Count == 0
+            ? "No reminders"
+            : pending > 0
+                ? $"{reminders.Count} · {pending} pending"
+                : $"{reminders.Count} done";
+
+        if (reminders.Count == 0)
+        {
+            CalendarReminderList.Children.Add(new TextBlock
+            {
+                Text = "Nothing planned yet.\nAdd a title and time below.",
+                Style = (Style)FindResource("MetadataStyle"),
+                FontSize = 10.5,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 6, 4, 0)
+            });
+            return;
+        }
+
+        foreach (var reminder in reminders)
+        {
+            CalendarReminderList.Children.Add(BuildCalendarReminderRow(reminder));
+        }
+    }
+
+    private FrameworkElement BuildCalendarReminderRow(Reminder reminder)
+    {
+        var due = !reminder.Acknowledged && reminder.DueAt <= DateTime.Now;
+
+        var grid = new Grid { Height = 22, Margin = new Thickness(0, 1, 0, 1) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(38) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var time = new TextBlock
+        {
+            Text = reminder.DueAt.ToString("HH:mm", System.Globalization.CultureInfo.CurrentCulture),
+            Style = (Style)FindResource("TimeLabelStyle"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Opacity = reminder.Acknowledged ? 0.5 : 1,
+            Foreground = due
+                ? (Brush)FindResource("IslandAccent")
+                : (Brush)FindResource("IslandMutedText")
+        };
+        grid.Children.Add(time);
+
+        var title = new TextBlock
+        {
+            Text = reminder.Title,
+            FontFamily = (FontFamily)FindResource("UiFont"),
+            FontSize = 11.5,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = reminder.Acknowledged
+                ? (Brush)FindResource("IslandMutedText")
+                : (Brush)FindResource("IslandText"),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+            ToolTip = reminder.Title,
+            TextDecorations = reminder.Acknowledged ? TextDecorations.Strikethrough : null
+        };
+        Grid.SetColumn(title, 1);
+        grid.Children.Add(title);
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(actions, 2);
+
+        if (due)
+        {
+            actions.Children.Add(BuildReminderIconButton(
+                "Acknowledge",
+                "M 1,5 L 4,8 L 9,1",
+                (Brush)FindResource("IslandAccent"),
+                () => AcknowledgeReminder(reminder.Id)));
+        }
+        else
+        {
+            actions.Children.Add(BuildReminderIconButton(
+                "Delete",
+                "M 1,1 L 9,9 M 9,1 L 1,9",
+                (Brush)FindResource("IslandMutedText"),
+                () => DeleteReminder(reminder.Id)));
+        }
+
+        grid.Children.Add(actions);
+        return grid;
+    }
+
+    private System.Windows.Controls.Button BuildReminderIconButton(string tooltip, string data, System.Windows.Media.Brush foreground, Action action)
+    {
+        var button = new System.Windows.Controls.Button
+        {
+            Width = 20,
+            Height = 20,
+            ToolTip = tooltip,
+            Style = (Style)FindResource("GhostIconButtonStyle"),
+            Foreground = foreground,
+            Content = new System.Windows.Shapes.Path
+            {
+                Data = Geometry.Parse(data),
+                Stroke = foreground,
+                StrokeThickness = 1.5,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                StrokeLineJoin = PenLineJoin.Round,
+                Width = 9,
+                Height = 9,
+                Stretch = Stretch.Uniform
+            }
+        };
+        button.Click += (_, _) => action();
+        return button;
+    }
+
 
     private async Task RefreshWirelessAsync()
     {
@@ -1489,16 +1930,23 @@ public partial class MainWindow : Window
     /// notifications are merged. <paramref name="dropIfExpanded"/> is for things the person can
     /// already see in the open panel (their own Wi-Fi toggle, Caps Lock...).
     /// </summary>
-    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null, bool dropIfExpanded = false, byte[]? icon = null)
+    private void ShowNodeNotification(string appName, string message, TimeSpan? duration = null, bool dropIfExpanded = false, byte[]? icon = null, string? reminderId = null, bool persistent = false)
     {
         if (dropIfExpanded && _isExpanded)
         {
             return;
         }
 
+        if (reminderId is not null && _activeNotification?.ReminderId == reminderId)
+        {
+            return;
+        }
+
         foreach (var pending in _notificationQueue)
         {
-            if (pending.App == appName && pending.Message == message)
+            if (reminderId is not null
+                    ? pending.ReminderId == reminderId
+                    : pending.App == appName && pending.Message == message)
             {
                 return;
             }
@@ -1506,14 +1954,24 @@ public partial class MainWindow : Window
 
         while (_notificationQueue.Count >= MaxQueuedNotifications)
         {
-            _notificationQueue.Dequeue();
+            if (!DropOldestNonPersistentNotification())
+            {
+                // Every queued banner is a reminder: the 1 s check retries later.
+                return;
+            }
         }
 
         _notificationQueue.Enqueue(new QueuedNotification(
-            appName, message, icon, duration ?? TimeSpan.FromSeconds(2.4), DateTime.UtcNow));
+            appName, message, icon, duration ?? TimeSpan.FromSeconds(2.4), DateTime.UtcNow, reminderId, persistent));
 
         if (_nodeNotificationActive)
         {
+            // A reminder stays visible until it is acknowledged; other banners wait behind it.
+            if (_activeNotification?.Persistent == true)
+            {
+                return;
+            }
+
             // Someone is waiting: the current one keeps its minimum time, then makes way.
             var now = DateTime.UtcNow;
             var earliest = _nodeNotificationShownUtc + MinNotificationTime;
@@ -1529,6 +1987,26 @@ public partial class MainWindow : Window
         TryShowNextNotification();
     }
 
+    /// <summary>Drops the oldest ordinary banner while keeping queued reminders intact.</summary>
+    private bool DropOldestNonPersistentNotification()
+    {
+        var count = _notificationQueue.Count;
+        var dropped = false;
+        for (var index = 0; index < count; index++)
+        {
+            var item = _notificationQueue.Dequeue();
+            if (!dropped && !item.Persistent)
+            {
+                dropped = true;
+                continue;
+            }
+
+            _notificationQueue.Enqueue(item);
+        }
+
+        return dropped;
+    }
+
     private void TryShowNextNotification()
     {
         if (_nodeNotificationActive || _isExpanded)
@@ -1539,7 +2017,7 @@ public partial class MainWindow : Window
         while (_notificationQueue.Count > 0)
         {
             var next = _notificationQueue.Dequeue();
-            if (DateTime.UtcNow - next.QueuedUtc > NotificationMaxAge)
+            if (!next.Persistent && DateTime.UtcNow - next.QueuedUtc > NotificationMaxAge)
             {
                 continue;
             }
@@ -1562,6 +2040,7 @@ public partial class MainWindow : Window
     {
         ExitIdleNotch(animate: false);
         _lastInteractionUtc = DateTime.UtcNow;
+        _activeNotification = notification;
         _nodeNotificationActive = true;
         _nodeNotificationShownUtc = DateTime.UtcNow;
 
@@ -1581,7 +2060,9 @@ public partial class MainWindow : Window
         NodeNotificationContent.Opacity = 0;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
         ClockText.Visibility = Visibility.Collapsed;
-        _nodeNotificationUntil = DateTime.UtcNow.Add(notification.Duration);
+        _nodeNotificationUntil = notification.Persistent
+            ? DateTime.MaxValue
+            : DateTime.UtcNow.Add(notification.Duration);
         _nodeNotificationTimer.Start();
 
         // Only the width animates: the pill stays 30 px tall and the content stays on one line.
@@ -1676,8 +2157,9 @@ public partial class MainWindow : Window
             }
         }
 
-        // ISLA's own banners (Caps Lock, battery, Wi-Fi...) use the app icon.
-        if (string.Equals(appName, "ISLA", StringComparison.OrdinalIgnoreCase) &&
+        // ISLA's own banners (Caps Lock, battery, Wi-Fi, reminders...) use the app icon.
+        if ((string.Equals(appName, "ISLA", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(appName, "Reminder", StringComparison.OrdinalIgnoreCase)) &&
             GetIslaNotificationIcon() is { } ownIcon)
         {
             ShowNotificationIcon(ownIcon);
@@ -1792,6 +2274,7 @@ public partial class MainWindow : Window
     {
         _nodeNotificationTimer.Stop();
         _nodeNotificationActive = false;
+        _activeNotification = null;
         NodeNotificationContent.BeginAnimation(OpacityProperty, null);
         NodeNotificationContent.Visibility = Visibility.Collapsed;
         IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
@@ -2598,6 +3081,7 @@ public partial class MainWindow : Window
         }
 
         var expandingFromNotch = expanded && _isIdleNotch;
+        QueuedNotification? persistentToRequeue = null;
         if (expanded)
         {
             // Keep the window where the notch left it: expanding happens in place so the
@@ -2606,18 +3090,33 @@ public partial class MainWindow : Window
             ExitIdleNotch(animate: false, resetTop: false);
             if (_nodeNotificationActive)
             {
-                // Opening the island dismisses the banner; whatever is still queued waits for the close.
+                // Opening the island dismisses the banner; whatever is still queued waits for
+                // the close. Unacknowledged reminders are put back so they return afterwards.
+                persistentToRequeue = _activeNotification is { Persistent: true } ? _activeNotification : null;
                 EndActiveNotification(restoreSize: false);
             }
         }
 
         _isExpanded = expanded;
         var version = ++_expandVersion;
+        if (expanded &&
+            persistentToRequeue is { ReminderId: not null } queued &&
+            _reminderService.Get(queued.ReminderId) is { Acknowledged: false } reminder &&
+            reminder.DueAt <= DateTime.Now &&
+            !_notificationQueue.Any(item => item.ReminderId == queued.ReminderId))
+        {
+            _notificationQueue.Enqueue(queued with { QueuedUtc = DateTime.UtcNow });
+        }
         UpdateMediaProgressTimer();
         if (expanded && _activeTab == "Media" && _lastMediaState is { } media)
         {
             // Show the current position immediately: the fast progress timer was stopped.
             UpdateMediaProgressDisplay(media);
+        }
+        if (expanded && _activeTab == "Calendar")
+        {
+            // Reminder states may have changed while the menu was closed.
+            RefreshCalendarUi();
         }
 
         var targetWidth = expanded ? ExpandedWidth : CompactWidth;
@@ -3366,6 +3865,10 @@ public partial class MainWindow : Window
         {
             _ = RefreshWeatherAsync();
         }
+        if (tab == "Calendar")
+        {
+            RefreshCalendarUi();
+        }
         var version = ++_tabVersion;
 
         // Highlight pill slides to the new tab.
@@ -3417,6 +3920,7 @@ public partial class MainWindow : Window
         yield return RadioPanel;
         yield return TimerPanel;
         yield return WeatherPanel;
+        yield return CalendarPanel;
     }
 
     private FrameworkElement GetPanel(string tab) => tab switch
@@ -3424,6 +3928,7 @@ public partial class MainWindow : Window
         "Settings" => _radioViewOpen ? RadioPanel : SettingsPanel,
         "Timer" => TimerPanel,
         "Weather" => WeatherPanel,
+        "Calendar" => CalendarPanel,
         _ => MediaPanel
     };
 
@@ -3432,6 +3937,7 @@ public partial class MainWindow : Window
         "Settings" => 1,
         "Timer" => 2,
         "Weather" => 3,
+        "Calendar" => 4,
         _ => 0
     };
 
@@ -3440,6 +3946,7 @@ public partial class MainWindow : Window
         "Settings" => SettingsHeight,
         "Timer" => TimerHeight,
         "Weather" => WeatherHeight,
+        "Calendar" => CalendarHeight,
         _ => MediaHeight
     };
 

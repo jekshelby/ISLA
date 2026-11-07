@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.4.0 - 2026-11-08
+
+### Added
+
+- Calendar tab: month grid with Monday-first weeks, previous/next month
+  navigation, a per-day reminder list, and a compact add form (title + 24-hour
+  time).
+- Reminders are stored in `%LOCALAPPDATA%\ISLA\reminders.json` and survive
+  restarts.
+- Due reminders appear as a persistent island notification. The banner stays
+  until it is acknowledged in the Calendar tab; opening the menu hides it and it
+  returns on collapse if it is still unacknowledged.
+- Days with pending reminders show a small accent dot. Due reminders can only be
+  dismissed with the acknowledge check; future reminders can be deleted.
+- Fifth dock tab for Calendar.
+
+### Changed
+
+- The notification queue keeps persistent reminder banners when the queue is
+  full, dropping ordinary banners first instead.
+- Reminder banners use the ISLA app icon in the notification circle.
+
+### Install
+
+Run `release\ISLA-Setup-v1.4.0.exe`. The build runs on Windows 10 1809+ and
+Windows 11 with the .NET 10 desktop runtime.
+
 ## 1.3.2 - 2026-11-08
 
 ### Added

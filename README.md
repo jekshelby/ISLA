@@ -2,11 +2,11 @@
 
 ISLA is a Windows desktop Dynamic Island companion built with C# and WPF.
 
-## Release 1.3.2
+## Release 1.4.0
 
 ISLA shows a compact, always-on-top island at the top centre of the desktop. It
-expands on hover and provides media, quick settings, Pomodoro, weather, and Windows
-notification controls.
+expands on hover and provides media, quick settings, Pomodoro, weather, calendar
+reminders, and Windows notification controls.
 
 ### Features
 
@@ -27,6 +27,12 @@ notification controls.
   humidity, wind, and a four-day forecast. Location is resolved from the IP
   address once and cached; forecast data comes from Open-Meteo and refreshes
   every 15 minutes or on demand.
+- Calendar tab with a Monday-first month grid, month navigation, and a per-day
+  list. Pick a day, enter a title and time, and the reminder is saved to
+  `%LOCALAPPDATA%\ISLA\reminders.json`. Days with pending reminders show a dot.
+- Reminder notifications: when a reminder is due, the island shows a persistent
+  banner that stays visible until it is acknowledged in the Calendar tab. The
+  banner returns after the menu is closed if it was not acknowledged.
 - Windows notification capture for apps such as Discord and Snipping Tool. Banners
   stay one line tall: app icon in a circle, app name, then the message. The pill
   only grows wider (up to 20% past the old banner width) and trims long text; the
@@ -55,6 +61,8 @@ notification controls.
   music plays.
 - The notification listener reacts instantly to Windows notification events and polls
   only every 5 s as a fallback.
+- The reminder check runs once per second and only rebuilds the Calendar panel
+  when the set of due reminders changes.
 
 ## Requirements
 
