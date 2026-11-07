@@ -182,6 +182,39 @@
                                        TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                     </Grid>
+                    <!-- Single row while a full-screen game is in the foreground:
+                         gamepad | GAME | live FPS / CPU / RAM / GPU / VRAM. -->
+                    <Grid x:Name="GameStatsContent"
+                          Visibility="Collapsed"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          Width="480">
+                        <StackPanel Orientation="Horizontal"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="&#xE7FC;"
+                                       FontFamily="Segoe MDL2 Assets"
+                                       FontSize="13"
+                                       Foreground="{StaticResource IslandAccent}"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Text="GAME"
+                                       Style="{StaticResource ContentSubtitleStyle}"
+                                       Foreground="{StaticResource IslandAccent}"
+                                       FontSize="10"
+                                       FontWeight="Bold"
+                                       VerticalAlignment="Center"
+                                       Margin="6,0,0,0" />
+                            <TextBlock x:Name="GameStatsText"
+                                       Style="{StaticResource ContentSubtitleStyle}"
+                                       Foreground="{StaticResource IslandText}"
+                                       FontSize="11.5"
+                                       FontWeight="SemiBold"
+                                       VerticalAlignment="Center"
+                                       Margin="8,0,0,0"
+                                       TextTrimming="CharacterEllipsis"
+                                       Text="FPS -- · CPU --% · RAM --" />
+                        </StackPanel>
+                    </Grid>
                 </Grid>
 
                 <!-- ============ EXPANDED ============

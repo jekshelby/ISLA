@@ -13,6 +13,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using System.Windows.Interop;
 using Windows.Devices.Radios;
+using ISLA.GameStats;
 using ISLA.Infrastructure;
 using ISLA.Media;
 using ISLA.Notifications;
@@ -57,6 +58,9 @@ public partial class MainWindow : Window
     private const double NotificationTextGap = 7;
     private const double NotificationAppMaxWidth = 150;
     private const double CompactHorizontalPadding = 5;
+    // Game HUD pill: wider than a notification so every stat fits on one line.
+    private const double GameHudWidth = 500;
+    private const double GameHudHorizontalPadding = 10;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     // Wider notch used while media plays: clock on the left, spectrum on the right.
     private const double IdleMusicNotchWidth = 82;
@@ -139,10 +143,12 @@ public partial class MainWindow : Window
     private readonly AppSettingsService _settingsService = new();
     private readonly WeatherService _weatherService;
     private readonly ReminderService _reminderService = new();
+    private readonly GameStatsService _gameStatsService = new();
     private readonly DispatcherTimer _settingsRefreshTimer;
     private readonly DispatcherTimer _pomodoroTimer;
     private readonly DispatcherTimer _weatherRefreshTimer;
     private readonly DispatcherTimer _reminderTimer;
+    private readonly DispatcherTimer _gameStatsTimer;
     private readonly DispatcherTimer _systemStateTimer;
     private readonly DispatcherTimer _nodeNotificationTimer;
     private readonly DispatcherTimer _idleTimer;
@@ -272,6 +278,11 @@ public partial class MainWindow : Window
     private string? _announcedTrackKey;
     private bool _spectrumActive;
 
+    // Game HUD: a detected full-screen game owns the compact island until it closes.
+    private GameStatsSnapshot? _lastGameStats;
+    private bool _gameHudActive;
+    private bool _gameHudVisible;
+
     public MainWindow()
     {
         InitializeComponent();
@@ -296,6 +307,8 @@ public partial class MainWindow : Window
         _weatherRefreshTimer.Tick += WeatherRefreshTimer_Tick;
         _reminderTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _reminderTimer.Tick += ReminderTimer_Tick;
+        _gameStatsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _gameStatsTimer.Tick += GameStatsTimer_Tick;
         _pomodoroTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _pomodoroTimer.Tick += PomodoroTimer_Tick;
         _systemStateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -317,6 +330,7 @@ public partial class MainWindow : Window
         _weatherRefreshTimer.Start();
         _reminderTimer.Start();
         EnqueueDueReminders();
+        _gameStatsTimer.Start();
         _systemStateTimer.Start();
         _lastInteractionUtc = DateTime.UtcNow;
         _idleTimer.Start();
@@ -2033,6 +2047,10 @@ public partial class MainWindow : Window
         if (version == _expandVersion && !_isExpanded)
         {
             TryShowNextNotification();
+            if (!_nodeNotificationActive)
+            {
+                TryRestoreGameHud();
+            }
         }
     }
 
@@ -2043,6 +2061,12 @@ public partial class MainWindow : Window
         _activeNotification = notification;
         _nodeNotificationActive = true;
         _nodeNotificationShownUtc = DateTime.UtcNow;
+
+        if (_gameHudVisible)
+        {
+            // The banner takes the pill over; the HUD comes back when the banner ends.
+            HideGameHud(restoreSize: false);
+        }
 
         var hasMessage = !string.IsNullOrWhiteSpace(notification.Message);
         NodeNotificationAppText.Text = notification.App;
@@ -2277,17 +2301,21 @@ public partial class MainWindow : Window
         _activeNotification = null;
         NodeNotificationContent.BeginAnimation(OpacityProperty, null);
         NodeNotificationContent.Visibility = Visibility.Collapsed;
-        IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
-        CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
-        CompactBatteryContent.Visibility = Visibility.Visible;
-        ClockText.Visibility = Visibility.Visible;
         _lastInteractionUtc = DateTime.UtcNow;
 
         if (!restoreSize)
         {
             // The island is open: it manages its own size.
+            RestoreCompactShell();
             return;
         }
+
+        if (TryRestoreGameHud())
+        {
+            return;
+        }
+
+        RestoreCompactShell();
 
         var animation = new DoubleAnimation
         {
@@ -2450,8 +2478,8 @@ public partial class MainWindow : Window
         }
 
         _spectrumActive = active;
-        CompactBatteryPercentText.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
-        CompactSpectrum.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        CompactBatteryPercentText.Visibility = active && !_gameHudVisible ? Visibility.Collapsed : Visibility.Visible;
+        CompactSpectrum.Visibility = active && !_gameHudVisible ? Visibility.Visible : Visibility.Collapsed;
         UpdateSpectrumAnimations();
         if (_isIdleNotch)
         {
@@ -2859,6 +2887,7 @@ public partial class MainWindow : Window
     private void IdleTimer_Tick(object? sender, EventArgs e)
     {
         if (_isIdleNotch || _isExpanded || NodeNotificationContent.Visibility == Visibility.Visible ||
+            _gameHudActive || GameStatsContent.Visibility == Visibility.Visible ||
             DateTime.UtcNow - _lastInteractionUtc < TimeSpan.FromSeconds(30))
         {
             return;
@@ -3070,6 +3099,172 @@ public partial class MainWindow : Window
     }
 
     // =================================================================================
+    //  Game HUD
+    // =================================================================================
+
+    private void GameStatsTimer_Tick(object? sender, EventArgs e)
+    {
+        var snapshot = _gameStatsService.Sample();
+        if (snapshot is null)
+        {
+            _gameHudActive = false;
+            _lastGameStats = null;
+            if (_gameHudVisible)
+            {
+                HideGameHud(restoreSize: !_isExpanded);
+            }
+
+            return;
+        }
+
+        _lastGameStats = snapshot;
+        _gameHudActive = true;
+
+        // The open menu and banners take precedence; the HUD returns when they finish.
+        if (_isExpanded || _nodeNotificationActive)
+        {
+            return;
+        }
+
+        if (_isIdleNotch)
+        {
+            ExitIdleNotch();
+        }
+
+        if (_gameHudVisible)
+        {
+            UpdateGameHud(snapshot);
+        }
+        else
+        {
+            ShowGameHud();
+        }
+    }
+
+    private void UpdateGameHud(GameStatsSnapshot snapshot)
+    {
+        var text = snapshot.Describe();
+        if (!string.Equals(GameStatsText.Text, text, StringComparison.Ordinal))
+        {
+            GameStatsText.Text = text;
+        }
+
+        GameStatsText.ToolTip = snapshot.Title;
+    }
+
+    private void ShowGameHud()
+    {
+        if (_isExpanded || _nodeNotificationActive || _lastGameStats is null)
+        {
+            return;
+        }
+
+        if (_gameHudVisible)
+        {
+            UpdateGameHud(_lastGameStats);
+            return;
+        }
+
+        PrepareGameHudContent();
+        GameStatsContent.Opacity = 0;
+
+        var animation = new DoubleAnimation
+        {
+            From = IslandSurface.Width,
+            To = GameHudWidth,
+            Duration = TimeSpan.FromMilliseconds(200),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            FillBehavior = FillBehavior.Stop
+        };
+        animation.Completed += (_, _) => IslandSurface.Width = GameHudWidth;
+        IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
+        GameStatsContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
+    }
+
+    /// <summary>
+    /// Swaps the compact row for the game stats without touching the pill width. Used when the
+    /// menu collapses straight back into the HUD, so the clock never flashes in between.
+    /// </summary>
+    private void PrepareGameHudContent()
+    {
+        _gameHudVisible = true;
+        CompactBatteryContent.Visibility = Visibility.Collapsed;
+        ClockText.Visibility = Visibility.Collapsed;
+        CompactSpectrum.Visibility = Visibility.Collapsed;
+        IdlePomodoro.Visibility = Visibility.Collapsed;
+        IdleSpectrum.Visibility = Visibility.Collapsed;
+
+        var contentWidth = GameHudWidth - (GameHudHorizontalPadding * 2);
+        GameStatsContent.Width = contentWidth;
+        CompactContent.Width = contentWidth;
+        IslandSurface.Padding = new Thickness(GameHudHorizontalPadding, 0, GameHudHorizontalPadding, 0);
+        CompactContent.Visibility = Visibility.Visible;
+        GameStatsContent.Visibility = Visibility.Visible;
+        if (_lastGameStats is not null)
+        {
+            UpdateGameHud(_lastGameStats);
+        }
+    }
+
+    private void HideGameHud(bool restoreSize)
+    {
+        if (!_gameHudVisible)
+        {
+            return;
+        }
+
+        _gameHudVisible = false;
+        GameStatsContent.BeginAnimation(OpacityProperty, null);
+        GameStatsContent.Visibility = Visibility.Collapsed;
+
+        // A banner or the open menu owns the layout and restores the compact row itself.
+        if (_nodeNotificationActive || _isExpanded)
+        {
+            return;
+        }
+
+        RestoreCompactShell();
+        if (!restoreSize)
+        {
+            return;
+        }
+
+        var animation = new DoubleAnimation
+        {
+            From = IslandSurface.Width,
+            To = CompactWidth,
+            Duration = TimeSpan.FromMilliseconds(180),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
+            FillBehavior = FillBehavior.Stop
+        };
+        animation.Completed += (_, _) => IslandSurface.Width = CompactWidth;
+        IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
+    }
+
+    private bool TryRestoreGameHud()
+    {
+        if (!_gameHudActive || _lastGameStats is null || _isExpanded || _nodeNotificationActive)
+        {
+            return false;
+        }
+
+        ShowGameHud();
+        return true;
+    }
+
+    /// <summary>Puts the compact battery/clock row back after a banner or the game HUD.</summary>
+    private void RestoreCompactShell()
+    {
+        IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
+        CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
+        CompactBatteryContent.Visibility = Visibility.Visible;
+        ClockText.Visibility = Visibility.Visible;
+        CompactSpectrum.Visibility = _spectrumActive ? Visibility.Visible : Visibility.Collapsed;
+        CompactBatteryPercentText.Visibility = _spectrumActive ? Visibility.Collapsed : Visibility.Visible;
+        GameStatsContent.Visibility = Visibility.Collapsed;
+    }
+
+    // =================================================================================
     //  Expand / collapse
     // =================================================================================
 
@@ -3088,6 +3283,12 @@ public partial class MainWindow : Window
             // pointer stays over the island, and the slide back to the normal inset waits
             // for the collapse.
             ExitIdleNotch(animate: false, resetTop: false);
+            if (_gameHudVisible)
+            {
+                // The menu replaces the HUD; it comes back after the collapse.
+                HideGameHud(restoreSize: false);
+            }
+
             if (_nodeNotificationActive)
             {
                 // Opening the island dismisses the banner; whatever is still queued waits for
@@ -3119,7 +3320,20 @@ public partial class MainWindow : Window
             RefreshCalendarUi();
         }
 
-        var targetWidth = expanded ? ExpandedWidth : CompactWidth;
+        // Collapsing while a game runs returns straight to the HUD instead of flashing the
+        // clock for a moment. Queued banners keep their turn; the HUD returns after them.
+        var restoreGameHud = !expanded &&
+                             _gameHudActive &&
+                             _lastGameStats is not null &&
+                             _notificationQueue.Count == 0;
+        if (restoreGameHud && !_gameHudVisible)
+        {
+            PrepareGameHudContent();
+            GameStatsContent.BeginAnimation(OpacityProperty, null);
+            GameStatsContent.Opacity = 1;
+        }
+
+        var targetWidth = expanded ? ExpandedWidth : (restoreGameHud ? GameHudWidth : CompactWidth);
         var targetHeight = expanded ? GetTabHeight(_activeTab) : CompactHeight;
         var targetRadius = expanded ? ExpandedRadius : CompactRadius;
         var duration = TimeSpan.FromMilliseconds(expanded ? 420 : 280);
@@ -3207,6 +3421,8 @@ public partial class MainWindow : Window
         _systemStateTimer.Stop();
         _nodeNotificationTimer.Stop();
         _idleTimer.Stop();
+        _gameStatsTimer.Stop();
+        _gameStatsService.Dispose();
         _windowsNotificationService.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

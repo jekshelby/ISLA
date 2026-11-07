@@ -2,11 +2,11 @@
 
 ISLA is a Windows desktop Dynamic Island companion built with C# and WPF.
 
-## Release 1.4.0
+## Release 1.5.0
 
 ISLA shows a compact, always-on-top island at the top centre of the desktop. It
 expands on hover and provides media, quick settings, Pomodoro, weather, calendar
-reminders, and Windows notification controls.
+reminders, a game performance HUD, and Windows notification controls.
 
 ### Features
 
@@ -33,6 +33,12 @@ reminders, and Windows notification controls.
 - Reminder notifications: when a reminder is due, the island shows a persistent
   banner that stays visible until it is acknowledged in the Calendar tab. The
   banner returns after the menu is closed if it was not acknowledged.
+- Game HUD: when a full-screen or borderless game is in the foreground, the island
+  becomes a live stats bar showing FPS, CPU, RAM, GPU, and VRAM. It updates every
+  second, stays visible for the whole session, disappears when the game is closed
+  or another window takes focus, and returns after banners or the open menu. FPS
+  comes from PresentMon when it is available; otherwise the HUD shows `FPS --`
+  while the system stats keep working.
 - Windows notification capture for apps such as Discord and Snipping Tool. Banners
   stay one line tall: app icon in a circle, app name, then the message. The pill
   only grows wider (up to 20% past the old banner width) and trims long text; the
@@ -63,12 +69,17 @@ reminders, and Windows notification controls.
   only every 5 s as a fallback.
 - The reminder check runs once per second and only rebuilds the Calendar panel
   when the set of due reminders changes.
+- Game detection also runs once per second and only starts PresentMon while a game
+  is in the foreground, so an idle desktop pays no measurement cost.
 
 ## Requirements
 
 - Windows 10 version 19041 or newer.
 - .NET 10 Desktop Runtime for running the installed application.
 - Windows notification access granted to ISLA.
+- Optional: PresentMon for the game HUD's FPS reading. The copy bundled with AMD
+  Adrenalin is found automatically; any `PresentMon.exe` on `PATH` also works.
+  Without it, CPU, RAM, GPU, and VRAM still appear and FPS shows `--`.
 
 ## Build
 

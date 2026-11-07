@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.5.0 - 2026-11-08
+
+### Added
+
+- Game HUD: when a full-screen or borderless game takes the foreground, the
+  dynamic island turns into a single-line stats bar with a gamepad icon, a `GAME`
+  label, and live FPS, CPU, RAM, GPU, and VRAM readings.
+- The HUD samples once per second and stays visible for the whole game session.
+  Focused banners and the expanded menu take priority; the HUD returns when they
+  finish. Closing the game or switching to another window hides it.
+- FPS is read from PresentMon when available (including the copy bundled with AMD
+  Adrenalin), without requiring elevation. Without PresentMon the HUD shows
+  `FPS --` and keeps the system stats.
+
+### Changed
+
+- The idle notch is suppressed while a game is detected, so the HUD is not
+  replaced by the battery notch after 30 seconds of no interaction.
+- Media continues to play during a game without covering the HUD with the compact
+  spectrum; the spectrum returns with the clock when the game closes.
+
+### Install
+
+Run `release\ISLA-Setup-v1.5.0.exe`. The build runs on Windows 10 1809+ and
+Windows 11 with the .NET 10 desktop runtime.
+
 ## 1.4.0 - 2026-11-08
 
 ### Added
