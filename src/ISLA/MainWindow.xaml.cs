@@ -1,7 +1,9 @@
 using System.IO;
 using System.Diagnostics;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Text.Json;
 using System.Windows.Forms;
 using System.Windows;
 using System.Windows.Controls;
@@ -17,6 +19,7 @@ using ISLA.Notifications;
 using ISLA.Pomodoro;
 using ISLA.QuickSettings;
 using ISLA.Settings;
+using ISLA.Weather;
 
 namespace ISLA;
 
@@ -55,13 +58,18 @@ public partial class MainWindow : Window
     private const double IdleNotchHeight = CompactHeight * 0.5;
     // Bottom corner radius of the idle notch (same value used for IslandSurface.CornerRadius).
     private const double IdleNotchRadius = IdleNotchHeight / 2;
+    // Top corners of the idle notch are concave: they flare outward into the screen edge
+    // instead of rounding inward like a floating pill. Must match the flare geometry below.
+    private const double IdleNotchFlareRadius = 7;
     private const double IdleBatteryStroke = 1;
     private const double NormalTopInset = 6;
     private const double ExpandedWidth = 520;
-    private const double MediaHeight = 280;
-    private const double TimerHeight = 280;
+    // 244 px of menu content (the old 280 px minus the 36 px header) + an 8 px top inset.
+    private const double MediaHeight = 252;
+    private const double TimerHeight = 252;
+    private const double WeatherHeight = 252;
     private const double SettingsHeight = MediaHeight;
-    private const double ExpandedContentHeight = 280;
+    private const double ExpandedContentHeight = 252;
     private const double CompactRadius = 15;
     private const double ExpandedRadius = 28;
 
@@ -101,7 +109,15 @@ public partial class MainWindow : Window
     {
         if (d is MainWindow window && window.IslandSurface is not null)
         {
-            window.IslandSurface.CornerRadius = new CornerRadius((double)e.NewValue);
+            var radius = (double)e.NewValue;
+            // Once the notch has attached to the screen edge, its flare wings carry the
+            // silhouette outward, so the top corners stay square and only the bottom
+            // corners animate. Until then the pill keeps its rounded top while it shrinks.
+            var flared = window._isIdleNotch &&
+                window.IdleNotchFlareLayer.Visibility == Visibility.Visible;
+            window.IslandSurface.CornerRadius = flared
+                ? new CornerRadius(0, 0, radius, radius)
+                : new CornerRadius(radius);
         }
     }
 
@@ -113,8 +129,10 @@ public partial class MainWindow : Window
     private readonly QuickSettingsService _quickSettingsService = new();
     private readonly PomodoroService _pomodoroService = new();
     private readonly AppSettingsService _settingsService = new();
+    private readonly WeatherService _weatherService;
     private readonly DispatcherTimer _settingsRefreshTimer;
     private readonly DispatcherTimer _pomodoroTimer;
+    private readonly DispatcherTimer _weatherRefreshTimer;
     private readonly DispatcherTimer _systemStateTimer;
     private readonly DispatcherTimer _nodeNotificationTimer;
     private readonly DispatcherTimer _idleTimer;
@@ -128,6 +146,7 @@ public partial class MainWindow : Window
     private bool _updatingVolumeSlider;
     private bool _isExpanded;
     private bool _isPinned;
+    private bool _refreshingWeather;
     private int _expandVersion;
     private int _tabVersion;
     private bool? _lastPlaying;
@@ -232,6 +251,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _weatherService = new WeatherService(_settingsService);
+        InitializeIdleNotchFlare();
         InitializePomodoroUi();
         _normalBatteryBrush = (System.Windows.Media.Brush)FindResource("IslandAccent");
 
@@ -247,6 +268,8 @@ public partial class MainWindow : Window
         _mediaDebounceTimer.Tick += MediaDebounceTimer_Tick;
         _settingsRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
         _settingsRefreshTimer.Tick += SettingsRefreshTimer_Tick;
+        _weatherRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(15) };
+        _weatherRefreshTimer.Tick += WeatherRefreshTimer_Tick;
         _pomodoroTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _pomodoroTimer.Tick += PomodoroTimer_Tick;
         _systemStateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -265,6 +288,7 @@ public partial class MainWindow : Window
         UpdateClock();
         _mediaRefreshTimer.Start();
         _settingsRefreshTimer.Start();
+        _weatherRefreshTimer.Start();
         _systemStateTimer.Start();
         _lastInteractionUtc = DateTime.UtcNow;
         _idleTimer.Start();
@@ -289,6 +313,7 @@ public partial class MainWindow : Window
         }
         await RefreshMediaAsync();
         await RefreshSettingsAsync();
+        _ = RefreshWeatherAsync();
         RefreshPomodoro();
     }
 
@@ -409,6 +434,107 @@ public partial class MainWindow : Window
 
         await RefreshWirelessAsync();
     }
+
+    // =================================================================================
+    //  Weather
+    // =================================================================================
+
+    private async void WeatherRefreshTimer_Tick(object? sender, EventArgs e)
+    {
+        // Keep the cache warm so opening the tab is instant.
+        await RefreshWeatherAsync();
+    }
+
+    private async void WeatherRefreshButton_Click(object sender, RoutedEventArgs e)
+    {
+        await RefreshWeatherAsync(forceRefresh: true);
+    }
+
+    private async Task RefreshWeatherAsync(bool forceRefresh = false)
+    {
+        if (_refreshingWeather)
+        {
+            return;
+        }
+
+        _refreshingWeather = true;
+        if (forceRefresh)
+        {
+            SetText(WeatherUpdatedText, "Refreshing...");
+        }
+
+        try
+        {
+            var state = await _weatherService.GetWeatherAsync(forceRefresh);
+            UpdateWeatherUi(state);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or
+                                              JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            AppLog.Warn("Weather refresh failed.", exception);
+            if (_weatherService.Cached is null)
+            {
+                SetText(WeatherLocationText, "Weather unavailable");
+                SetText(WeatherTemperatureText, "--°");
+                SetText(WeatherDescriptionText, "Could not load the forecast");
+                SetText(WeatherDetailText, "Check your internet connection and try again");
+                SetText(WeatherUpdatedText, string.Empty);
+            }
+            else
+            {
+                SetText(WeatherUpdatedText, "Refresh failed");
+            }
+        }
+        finally
+        {
+            _refreshingWeather = false;
+        }
+    }
+
+    private void UpdateWeatherUi(WeatherState state)
+    {
+        var location = string.IsNullOrWhiteSpace(state.Country)
+            ? state.City
+            : $"{state.City}, {state.Country}";
+
+        SetText(WeatherLocationText, location);
+        SetText(WeatherTemperatureText, $"{Math.Round(state.Temperature)}°");
+        SetText(WeatherDescriptionText, state.Description);
+        SetText(
+            WeatherDetailText,
+            $"Feels like {Math.Round(state.ApparentTemperature)}°  ·  Humidity {state.Humidity}%  ·  Wind {Math.Round(state.WindSpeed)} km/h");
+
+        WeatherIconPath.Data = FindWeatherIcon(state.IconKey) ?? WeatherIconPath.Data;
+
+        var dayViews = new (TextBlock Label, System.Windows.Shapes.Path Icon, TextBlock Temperature)[]
+        {
+            (WeatherDay0Label, WeatherDay0Icon, WeatherDay0Temp),
+            (WeatherDay1Label, WeatherDay1Icon, WeatherDay1Temp),
+            (WeatherDay2Label, WeatherDay2Icon, WeatherDay2Temp),
+            (WeatherDay3Label, WeatherDay3Icon, WeatherDay3Temp)
+        };
+
+        for (var index = 0; index < dayViews.Length; index++)
+        {
+            var view = dayViews[index];
+            if (index >= state.Days.Count)
+            {
+                SetText(view.Label, "---");
+                SetText(view.Temperature, "--° / --°");
+                continue;
+            }
+
+            var day = state.Days[index];
+            SetText(view.Label, index == 0 ? "Today" : day.DayLabel);
+            view.Icon.Data = FindWeatherIcon(day.IconKey) ?? view.Icon.Data;
+            SetText(view.Temperature, $"{Math.Round(day.Max)}° / {Math.Round(day.Min)}°");
+        }
+
+        SetText(WeatherUpdatedText, $"Updated {state.UpdatedAt:HH:mm}");
+    }
+
+    private Geometry? FindWeatherIcon(string key) =>
+        TryFindResource($"WeatherIcon{key}") as Geometry;
 
     private async Task RefreshWirelessAsync()
     {
@@ -543,34 +669,60 @@ public partial class MainWindow : Window
     private void SetIdleBatteryEdge(int percent)
     {
         // Fixed notch size: independent from the island's animated size, so never clipped.
-        // The stroke is centred on a path inset by half the thickness so it stays fully
-        // inside the notch bounds.
-        IdleBatteryEdge.Stroke = GetBatteryBrush(percent);
+        // The stroke is inset by half the thickness so the body outline stays fully inside
+        // the notch; the top corners then flare outward into the screen edge.
+        var brush = GetBatteryBrush(percent);
+        IdleBatteryEdge.Stroke = brush;
+        // The unfilled part of the ring keeps the same colour, only faded.
+        IdleBatteryTrack.Stroke = brush;
+        IdleBatteryTrack.Opacity = 0.35;
+
         const double inset = IdleBatteryStroke / 2;
         const double left = inset;
         var right = _idleNotchWidth - inset;
-        const double top = 0;                       // flush with the screen edge (no top line)
         const double bottom = IdleNotchHeight - inset;
-        const double r = IdleNotchRadius - inset;   // follows the notch's bottom radius
-        var size = new System.Windows.Size(r, r);
+        var radius = IdleNotchRadius - inset;
+        var bottomArcSize = new System.Windows.Size(radius, radius);
+
+        // Concave top corners: the outline begins on the screen edge a little outside the
+        // body and curves down into the vertical side, so the notch widens toward the screen
+        // edge (flare) instead of narrowing (rounded pill corner).
+        var flare = IdleNotchFlareRadius;
+        var flareRadius = flare + inset;
+        var flareSideY = flare;
+        var flareTopX = flare - (2 * Math.Sqrt(flare * inset));
+        var flareAngle = Math.Asin((flare - inset) / flareRadius);
+        var flareArcSize = new System.Windows.Size(flareRadius, flareRadius);
+        var leftFlareCenter = new System.Windows.Point(-flare, flare);
+        var rightFlareCenter = new System.Windows.Point(_idleNotchWidth + flare, flare);
 
         IdleBatteryTrack.Width = IdleBatteryEdge.Width = _idleNotchWidth;
         IdleBatteryTrack.Height = IdleBatteryEdge.Height = IdleNotchHeight;
 
-        // Track: left side -> bottom-left curve -> bottom line -> bottom-right curve -> right side.
-        var track = new PathFigure { StartPoint = new System.Windows.Point(left, top), IsClosed = false };
-        track.Segments.Add(new LineSegment(new System.Windows.Point(left, bottom - r), true));
-        track.Segments.Add(new ArcSegment(new System.Windows.Point(left + r, bottom), size, 0, false, SweepDirection.Counterclockwise, true));
-        track.Segments.Add(new LineSegment(new System.Windows.Point(right - r, bottom), true));
-        track.Segments.Add(new ArcSegment(new System.Windows.Point(right, bottom - r), size, 0, false, SweepDirection.Counterclockwise, true));
-        track.Segments.Add(new LineSegment(new System.Windows.Point(right, top), true));
+        // Track: top-left flare -> left side -> bottom-left curve -> bottom line ->
+        // bottom-right curve -> right side -> top-right flare.
+        var track = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(-flareTopX, inset),
+            IsClosed = false
+        };
+        track.Segments.Add(new ArcSegment(
+            new System.Windows.Point(left, flareSideY), flareArcSize, 0, false, SweepDirection.Clockwise, true));
+        track.Segments.Add(new LineSegment(new System.Windows.Point(left, bottom - radius), true));
+        track.Segments.Add(new ArcSegment(
+            new System.Windows.Point(left + radius, bottom), bottomArcSize, 0, false, SweepDirection.Counterclockwise, true));
+        track.Segments.Add(new LineSegment(new System.Windows.Point(right - radius, bottom), true));
+        track.Segments.Add(new ArcSegment(
+            new System.Windows.Point(right, bottom - radius), bottomArcSize, 0, false, SweepDirection.Counterclockwise, true));
+        track.Segments.Add(new LineSegment(new System.Windows.Point(right, flareSideY), true));
+        track.Segments.Add(new ArcSegment(
+            new System.Windows.Point(_idleNotchWidth + flareTopX, inset), flareArcSize, 0, false, SweepDirection.Clockwise, true));
         var trackGeometry = new PathGeometry();
         trackGeometry.Figures.Add(track);
         trackGeometry.Freeze();
         IdleBatteryTrack.Data = trackGeometry;
 
-        // Progress runs along the WHOLE outline, left -> right:
-        // left side, bottom-left curve, bottom line, bottom-right curve, right side.
+        // Progress runs along the whole visible outline, top-left -> bottom -> top-right.
         if (percent < 0)
         {
             IdleBatteryEdge.Data = Geometry.Empty;
@@ -578,10 +730,11 @@ public partial class MainWindow : Window
         }
 
         var progress = Math.Clamp(percent, 0, 100) / 100d;
-        var sideLength = bottom - r - top;
-        var arcLength = Math.PI * r / 2;
-        var lineLength = (right - r) - (left + r);
-        var totalLength = sideLength * 2 + arcLength * 2 + lineLength;
+        var flareLength = flareRadius * flareAngle;
+        var sideLength = Math.Max(0, (bottom - radius) - flareSideY);
+        var arcLength = Math.PI * radius / 2;
+        var lineLength = (right - radius) - (left + radius);
+        var totalLength = (flareLength * 2) + (sideLength * 2) + (arcLength * 2) + lineLength;
         var remaining = totalLength * progress;
         if (remaining <= 0.01)
         {
@@ -589,60 +742,147 @@ public partial class MainWindow : Window
             return;
         }
 
-        var figure = new PathFigure { StartPoint = new System.Windows.Point(left, top), IsClosed = false };
+        var figure = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(-flareTopX, inset),
+            IsClosed = false
+        };
+        var take = remaining;
 
-        // 1) left side (top -> down)
-        var take = Math.Min(remaining, sideLength);
-        figure.Segments.Add(new LineSegment(new System.Windows.Point(left, top + take), true));
-        remaining -= take;
+        // 1) top-left flare (screen edge -> 9 o'clock)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, flareLength);
+            var angle = -flareAngle + (flareAngle * (take / flareLength));
+            figure.Segments.Add(new ArcSegment(
+                new System.Windows.Point(
+                    leftFlareCenter.X + flareRadius * Math.Cos(angle),
+                    leftFlareCenter.Y + flareRadius * Math.Sin(angle)),
+                flareArcSize, 0, false, SweepDirection.Clockwise, true));
+            remaining -= take;
+        }
 
-        // 2) bottom-left curve (9 o'clock -> 6 o'clock)
+        // 2) left side (top -> down)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, sideLength);
+            figure.Segments.Add(new LineSegment(new System.Windows.Point(left, flareSideY + take), true));
+            remaining -= take;
+        }
+
+        // 3) bottom-left curve (9 o'clock -> 6 o'clock)
         if (remaining > 0)
         {
             take = Math.Min(remaining, arcLength);
             var t = take / arcLength;
             var angle = (180 - 90 * t) * Math.PI / 180;
-            var cx = left + r;
-            var cy = bottom - r;
+            var cx = left + radius;
+            var cy = bottom - radius;
             figure.Segments.Add(new ArcSegment(
-                new System.Windows.Point(cx + r * Math.Cos(angle), cy + r * Math.Sin(angle)),
-                size, 0, false, SweepDirection.Counterclockwise, true));
+                new System.Windows.Point(cx + radius * Math.Cos(angle), cy + radius * Math.Sin(angle)),
+                bottomArcSize, 0, false, SweepDirection.Counterclockwise, true));
             remaining -= take;
         }
 
-        // 3) bottom line (left -> right)
+        // 4) bottom line (left -> right)
         if (remaining > 0)
         {
             take = Math.Min(remaining, lineLength);
-            figure.Segments.Add(new LineSegment(new System.Windows.Point(left + r + take, bottom), true));
+            figure.Segments.Add(new LineSegment(new System.Windows.Point(left + radius + take, bottom), true));
             remaining -= take;
         }
 
-        // 4) bottom-right curve (6 o'clock -> 3 o'clock)
+        // 5) bottom-right curve (6 o'clock -> 3 o'clock)
         if (remaining > 0)
         {
             take = Math.Min(remaining, arcLength);
             var t = take / arcLength;
             var angle = (90 - 90 * t) * Math.PI / 180;
-            var cx = right - r;
-            var cy = bottom - r;
+            var cx = right - radius;
+            var cy = bottom - radius;
             figure.Segments.Add(new ArcSegment(
-                new System.Windows.Point(cx + r * Math.Cos(angle), cy + r * Math.Sin(angle)),
-                size, 0, false, SweepDirection.Counterclockwise, true));
+                new System.Windows.Point(cx + radius * Math.Cos(angle), cy + radius * Math.Sin(angle)),
+                bottomArcSize, 0, false, SweepDirection.Counterclockwise, true));
             remaining -= take;
         }
 
-        // 5) right side (bottom -> up)
+        // 6) right side (bottom -> up)
         if (remaining > 0)
         {
             take = Math.Min(remaining, sideLength);
-            figure.Segments.Add(new LineSegment(new System.Windows.Point(right, bottom - r - take), true));
+            figure.Segments.Add(new LineSegment(new System.Windows.Point(right, bottom - radius - take), true));
+            remaining -= take;
+        }
+
+        // 7) top-right flare (3 o'clock -> screen edge)
+        if (remaining > 0)
+        {
+            take = Math.Min(remaining, flareLength);
+            var angle = Math.PI + (flareAngle * (take / flareLength));
+            figure.Segments.Add(new ArcSegment(
+                new System.Windows.Point(
+                    rightFlareCenter.X + flareRadius * Math.Cos(angle),
+                    rightFlareCenter.Y + flareRadius * Math.Sin(angle)),
+                flareArcSize, 0, false, SweepDirection.Clockwise, true));
         }
 
         var progressGeometry = new PathGeometry();
         progressGeometry.Figures.Add(figure);
         progressGeometry.Freeze();
         IdleBatteryEdge.Data = progressGeometry;
+    }
+
+    /// <summary>
+    /// Builds the two concave corner wings that join the idle notch to the screen edge.
+    /// They are anchored to the island's left/right edges, so they follow the width animation.
+    /// </summary>
+    private void InitializeIdleNotchFlare()
+    {
+        var radius = IdleNotchFlareRadius;
+        // Overlap the wing 1 px into the body so the anti-aliased edges cannot leave a
+        // faint seam where the two fills meet (the overlap paints over the body).
+        var overlap = 1d;
+
+        // Left wing: filled area between the outward arc and the body's top-left corner.
+        var left = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(radius, radius),
+            IsClosed = true
+        };
+        left.Segments.Add(new ArcSegment(
+            new System.Windows.Point(0, 0), new System.Windows.Size(radius, radius),
+            0, false, SweepDirection.Counterclockwise, true));
+        left.Segments.Add(new LineSegment(new System.Windows.Point(radius + overlap, 0), true));
+        left.Segments.Add(new LineSegment(new System.Windows.Point(radius + overlap, radius), true));
+        var leftGeometry = new PathGeometry();
+        leftGeometry.Figures.Add(left);
+        leftGeometry.Freeze();
+        IdleNotchFlareLeft.Width = IdleNotchFlareLeft.Height = radius;
+        IdleNotchFlareLeft.Margin = new Thickness(-radius, 0, 0, 0);
+        IdleNotchFlareLeft.Data = leftGeometry;
+
+        // Right wing: mirrored.
+        var right = new PathFigure
+        {
+            StartPoint = new System.Windows.Point(0, radius),
+            IsClosed = true
+        };
+        right.Segments.Add(new ArcSegment(
+            new System.Windows.Point(radius, 0), new System.Windows.Size(radius, radius),
+            0, false, SweepDirection.Clockwise, true));
+        right.Segments.Add(new LineSegment(new System.Windows.Point(-overlap, 0), true));
+        right.Segments.Add(new LineSegment(new System.Windows.Point(-overlap, radius), true));
+        var rightGeometry = new PathGeometry();
+        rightGeometry.Figures.Add(right);
+        rightGeometry.Freeze();
+        IdleNotchFlareRight.Width = IdleNotchFlareRight.Height = radius;
+        IdleNotchFlareRight.Margin = new Thickness(0, 0, -radius, 0);
+        IdleNotchFlareRight.Data = rightGeometry;
+    }
+
+    private void SetIdleNotchFlareVisibility(Visibility visibility)
+    {
+        IdleNotchFlareLayer.Visibility = visibility;
     }
 
     private void NotifyWirelessChanges(QuickSettingsState state)
@@ -2111,6 +2351,8 @@ public partial class MainWindow : Window
         _lastInteractionUtc = DateTime.UtcNow;
         if (_isIdleNotch)
         {
+            // First hover returns to the compact dynamic island. The menu only opens on a
+            // later hover of that island, so the notch never jumps straight into the menu.
             ExitIdleNotch();
             return;
         }
@@ -2155,8 +2397,13 @@ public partial class MainWindow : Window
         ApplyIdleClockLayout();
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 10;
-        // A notch is flush with the top edge: no horizontal inset and no rounded top corners.
+        // A notch is flush with the top edge: no horizontal inset. Its top corners stay
+        // square; the flare wings below carry the silhouette outward into the screen edge.
+        IslandSurface.Margin = new Thickness(0);
         IslandSurface.Padding = new Thickness(0);
+        // The wings only appear once the notch has reached the screen edge (see the
+        // Completed handler).
+        SetIdleNotchFlareVisibility(Visibility.Collapsed);
         AnimateWindowTop(SystemParameters.WorkArea.Top, TimeSpan.FromMilliseconds(320), CollapseEase);
         IslandSurface.BeginAnimation(WidthProperty,
             MakeAnimation(_idleNotchWidth, TimeSpan.FromMilliseconds(320), CollapseEase), HandoffBehavior.SnapshotAndReplace);
@@ -2167,6 +2414,8 @@ public partial class MainWindow : Window
         {
             if (_isIdleNotch)
             {
+                // Attach: the wings now bridge the square top corners into the screen edge.
+                SetIdleNotchFlareVisibility(Visibility.Visible);
                 IslandSurface.CornerRadius = new CornerRadius(0, 0, IdleNotchRadius, IdleNotchRadius);
                 SetIdleBatteryEdge(_lastBatteryPercent);
                 var edgeVisibility = _pomodoroActive ? Visibility.Collapsed : Visibility.Visible;
@@ -2249,7 +2498,7 @@ public partial class MainWindow : Window
         IslandSurface.BeginAnimation(WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
-    private void ExitIdleNotch(bool animate = true)
+    private void ExitIdleNotch(bool animate = true, bool resetTop = true)
     {
         if (!_isIdleNotch)
         {
@@ -2266,7 +2515,9 @@ public partial class MainWindow : Window
         CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
         CompactContent.Margin = new Thickness(0);
         ClockText.FontSize = 13;
+        IslandSurface.Margin = new Thickness(0);
         IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
+        SetIdleNotchFlareVisibility(Visibility.Collapsed);
         if (!animate)
         {
             IslandSurface.BeginAnimation(WidthProperty, null);
@@ -2275,12 +2526,19 @@ public partial class MainWindow : Window
             IslandSurface.Width = CompactWidth;
             IslandSurface.Height = CompactHeight;
             IslandRadius = CompactRadius;
-            Top = SystemParameters.WorkArea.Top + NormalTopInset;
+            if (resetTop)
+            {
+                Top = SystemParameters.WorkArea.Top + NormalTopInset;
+            }
+
             return;
         }
 
-        AnimateWindowTop(SystemParameters.WorkArea.Top + NormalTopInset,
-            TimeSpan.FromMilliseconds(280), ExpandEase);
+        if (resetTop)
+        {
+            AnimateWindowTop(SystemParameters.WorkArea.Top + NormalTopInset,
+                TimeSpan.FromMilliseconds(280), ExpandEase);
+        }
         IslandSurface.BeginAnimation(WidthProperty,
             MakeAnimation(CompactWidth, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
         IslandSurface.BeginAnimation(HeightProperty,
@@ -2339,9 +2597,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        var expandingFromNotch = expanded && _isIdleNotch;
         if (expanded)
         {
-            ExitIdleNotch(animate: false);
+            // Keep the window where the notch left it: expanding happens in place so the
+            // pointer stays over the island, and the slide back to the normal inset waits
+            // for the collapse.
+            ExitIdleNotch(animate: false, resetTop: false);
             if (_nodeNotificationActive)
             {
                 // Opening the island dismisses the banner; whatever is still queued waits for the close.
@@ -2363,6 +2625,13 @@ public partial class MainWindow : Window
         var targetRadius = expanded ? ExpandedRadius : CompactRadius;
         var duration = TimeSpan.FromMilliseconds(expanded ? 420 : 280);
         var ease = expanded ? ExpandEase : CollapseEase;
+        var targetTop = SystemParameters.WorkArea.Top + NormalTopInset;
+        if (!expandingFromNotch && Math.Abs(Top - targetTop) > 0.5)
+        {
+            // Coming out of the idle notch: expand in place first (so the pointer stays over
+            // the island), and slide back to the normal inset only when collapsing.
+            AnimateWindowTop(targetTop, duration, ease);
+        }
 
         if (expanded)
         {
@@ -2412,12 +2681,6 @@ public partial class MainWindow : Window
             _ = PumpNotificationsAfterCollapseAsync(version);
 
         }
-    }
-
-    private void CloseButton_Click(object sender, RoutedEventArgs e)
-    {
-        _isPinned = false;
-        SetExpanded(false);
     }
 
     private void Window_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -3099,6 +3362,10 @@ public partial class MainWindow : Window
         {
             RefreshSettingsIfStale();
         }
+        if (tab == "Weather")
+        {
+            _ = RefreshWeatherAsync();
+        }
         var version = ++_tabVersion;
 
         // Highlight pill slides to the new tab.
@@ -3149,12 +3416,14 @@ public partial class MainWindow : Window
         yield return SettingsPanel;
         yield return RadioPanel;
         yield return TimerPanel;
+        yield return WeatherPanel;
     }
 
     private FrameworkElement GetPanel(string tab) => tab switch
     {
         "Settings" => _radioViewOpen ? RadioPanel : SettingsPanel,
         "Timer" => TimerPanel,
+        "Weather" => WeatherPanel,
         _ => MediaPanel
     };
 
@@ -3162,6 +3431,7 @@ public partial class MainWindow : Window
     {
         "Settings" => 1,
         "Timer" => 2,
+        "Weather" => 3,
         _ => 0
     };
 
@@ -3169,6 +3439,7 @@ public partial class MainWindow : Window
     {
         "Settings" => SettingsHeight,
         "Timer" => TimerHeight,
+        "Weather" => WeatherHeight,
         _ => MediaHeight
     };
 

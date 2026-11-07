@@ -2,15 +2,20 @@
 
 ISLA is a Windows desktop Dynamic Island companion built with C# and WPF.
 
-## Release 1.3.1
+## Release 1.3.2
 
 ISLA shows a compact, always-on-top island at the top centre of the desktop. It
-expands on hover and provides media, quick settings, Pomodoro, and Windows
+expands on hover and provides media, quick settings, Pomodoro, weather, and Windows
 notification controls.
 
 ### Features
 
 - Dynamic Island-style floating interface with hover expansion, tray pinning, and smooth animations.
+  The idle notch stays attached to the top screen edge with concave top corners that flare
+  outward into the edge. Hovering it first returns to the compact dynamic island; the menu
+  opens on the next hover, so the notch never jumps straight into the full panel.
+- Expanded view starts directly with the menu: no brand header or close button, so the
+  panel is about 10% shorter; Escape or clicking outside still collapses it.
 - Media player controls through Windows Global System Media Transport Controls:
   title, artist, album art, play/pause, previous/next, seeking, and a local
   progress clock with a mini spectrum.
@@ -18,6 +23,10 @@ notification controls.
   Wi-Fi scanning/connecting and paired Bluetooth device details.
 - Pomodoro timer with focus, short-break, and long-break phases, duration
   presets, a progress ring, and an optional focus mode that holds notifications.
+- Weather tab with the current temperature, conditions, apparent temperature,
+  humidity, wind, and a four-day forecast. Location is resolved from the IP
+  address once and cached; forecast data comes from Open-Meteo and refreshes
+  every 15 minutes or on demand.
 - Windows notification capture for apps such as Discord and Snipping Tool. Banners
   stay one line tall: app icon in a circle, app name, then the message. The pill
   only grows wider (up to 20% past the old banner width) and trims long text; the

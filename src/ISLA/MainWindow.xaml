@@ -190,7 +190,7 @@
                 <Grid x:Name="ExpandedContent"
                       Visibility="Collapsed"
                       Width="484"
-                      Height="280"
+                      Height="252"
                       Margin="0,0,0,0"
                       HorizontalAlignment="Center"
                       VerticalAlignment="Top"
@@ -199,32 +199,11 @@
                     <Grid.RenderTransform>
                         <TranslateTransform x:Name="ExpandedTranslate" />
                     </Grid.RenderTransform>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="*" />
-                    </Grid.RowDefinitions>
 
-                    <!-- header -->
-                    <Grid Margin="0,0,0,2" Height="34">
-                        <TextBlock Text="ISLA"
-                                   Style="{StaticResource BrandStyle}"
-                                   VerticalAlignment="Center" />
-                        <Button HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                ToolTip="Close"
-                                Click="CloseButton_Click"
-                                Style="{StaticResource GhostIconButtonStyle}">
-                            <Path Data="M 1,1 L 9,9 M 9,1 L 1,9"
-                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ButtonBase}}"
-                                  StrokeThickness="1.5"
-                                  StrokeStartLineCap="Round"
-                                  StrokeEndLineCap="Round"
-                                  Width="10" Height="10" Stretch="Uniform" />
-                        </Button>
-                    </Grid>
-
-                    <!-- content area -->
-                    <Grid Grid.Row="1">
+                    <!-- No brand header or close button: the menu starts right away so the
+                         island stays compact. The small top inset keeps the content clear of
+                         the pill's rounded corners. -->
+                    <Grid Margin="0,8,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
@@ -700,6 +679,137 @@
                             </Border>
                         </Grid>
 
+                        <!-- ===== WEATHER PANEL ===== -->
+                        <StackPanel x:Name="WeatherPanel" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Weather" Style="{StaticResource EyebrowStyle}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="WeatherLocationText"
+                                           Grid.Column="1"
+                                           Text="Locating..."
+                                           Style="{StaticResource MetadataStyle}"
+                                           FontSize="11"
+                                           HorizontalAlignment="Right"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           Margin="12,0,0,0" />
+                            </Grid>
+
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock x:Name="WeatherTemperatureText"
+                                               Text="--°"
+                                               Style="{StaticResource DisplayTimeStyle}"
+                                               FontSize="42" />
+                                    <TextBlock x:Name="WeatherDescriptionText"
+                                               Text="Fetching forecast..."
+                                               Style="{StaticResource ContentSubtitleStyle}"
+                                               Margin="0,2,0,0" />
+                                    <TextBlock x:Name="WeatherDetailText"
+                                               Text="Feels like --°  ·  Humidity --%  ·  Wind -- km/h"
+                                               Style="{StaticResource MetadataStyle}"
+                                               FontSize="11"
+                                               Margin="0,2,0,0" />
+                                </StackPanel>
+                                <Path x:Name="WeatherIconPath"
+                                      Grid.Column="1"
+                                      Width="44" Height="44"
+                                      Stretch="Uniform"
+                                      Stroke="{StaticResource IslandAccent}"
+                                      StrokeThickness="1.3"
+                                      StrokeLineJoin="Round"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      VerticalAlignment="Center"
+                                      Margin="16,0,8,0" />
+                            </Grid>
+
+                            <Border Height="1" Background="{StaticResource IslandBorder}" Margin="0,6,0,6" />
+
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="WeatherDay0Label" Text="---" Style="{StaticResource MetadataStyle}"
+                                               FontSize="10.5" HorizontalAlignment="Center" />
+                                    <Path x:Name="WeatherDay0Icon" Width="22" Height="22" Margin="0,3,0,3"
+                                          Stretch="Uniform" Stroke="{StaticResource IslandTextSecondary}"
+                                          StrokeThickness="1.2" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          HorizontalAlignment="Center" />
+                                    <TextBlock x:Name="WeatherDay0Temp" Text="--° / --°" Style="{StaticResource CardLabelStyle}"
+                                               FontSize="11" HorizontalAlignment="Center" />
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="WeatherDay1Label" Text="---" Style="{StaticResource MetadataStyle}"
+                                               FontSize="10.5" HorizontalAlignment="Center" />
+                                    <Path x:Name="WeatherDay1Icon" Width="22" Height="22" Margin="0,3,0,3"
+                                          Stretch="Uniform" Stroke="{StaticResource IslandTextSecondary}"
+                                          StrokeThickness="1.2" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          HorizontalAlignment="Center" />
+                                    <TextBlock x:Name="WeatherDay1Temp" Text="--° / --°" Style="{StaticResource CardLabelStyle}"
+                                               FontSize="11" HorizontalAlignment="Center" />
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="WeatherDay2Label" Text="---" Style="{StaticResource MetadataStyle}"
+                                               FontSize="10.5" HorizontalAlignment="Center" />
+                                    <Path x:Name="WeatherDay2Icon" Width="22" Height="22" Margin="0,3,0,3"
+                                          Stretch="Uniform" Stroke="{StaticResource IslandTextSecondary}"
+                                          StrokeThickness="1.2" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          HorizontalAlignment="Center" />
+                                    <TextBlock x:Name="WeatherDay2Temp" Text="--° / --°" Style="{StaticResource CardLabelStyle}"
+                                               FontSize="11" HorizontalAlignment="Center" />
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="3" HorizontalAlignment="Center">
+                                    <TextBlock x:Name="WeatherDay3Label" Text="---" Style="{StaticResource MetadataStyle}"
+                                               FontSize="10.5" HorizontalAlignment="Center" />
+                                    <Path x:Name="WeatherDay3Icon" Width="22" Height="22" Margin="0,3,0,3"
+                                          Stretch="Uniform" Stroke="{StaticResource IslandTextSecondary}"
+                                          StrokeThickness="1.2" StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          HorizontalAlignment="Center" />
+                                    <TextBlock x:Name="WeatherDay3Temp" Text="--° / --°" Style="{StaticResource CardLabelStyle}"
+                                               FontSize="11" HorizontalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
+
+                            <Grid Margin="0,4,0,0">
+                                <TextBlock x:Name="WeatherUpdatedText"
+                                           Style="{StaticResource MetadataStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                                <Button x:Name="WeatherRefreshButton"
+                                        HorizontalAlignment="Right"
+                                        Click="WeatherRefreshButton_Click"
+                                        ToolTip="Refresh weather"
+                                        Style="{StaticResource GhostIconButtonStyle}">
+                                    <Path Data="M 13,5 A 5,5 0 1 0 13,10 M 13,2 L 13,6 L 9,6"
+                                          Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ButtonBase}}"
+                                          StrokeThickness="1.4"
+                                          StrokeLineJoin="Round"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          Width="13" Height="13" Stretch="Uniform" />
+                                </Button>
+                            </Grid>
+                        </StackPanel>
+
                         <!-- ===== DOCK ===== -->
                         <Border Grid.Row="1"
                                 Background="{StaticResource IslandDock}"
@@ -723,7 +833,7 @@
                                     </Border.RenderTransform>
                                 </Border>
 
-                                <UniformGrid Columns="3">
+                                <UniformGrid Columns="4">
                                     <RadioButton Tag="Media" GroupName="IslandDock" IsChecked="True"
                                                  Checked="TabButton_Click" ToolTip="Media"
                                                  Style="{StaticResource DockButtonStyle}">
@@ -758,6 +868,17 @@
                                                   Width="6" Height="6" Stretch="Fill" />
                                         </Grid>
                                     </RadioButton>
+
+                                    <RadioButton Tag="Weather" GroupName="IslandDock"
+                                                 Checked="TabButton_Click" ToolTip="Weather forecast"
+                                                 Style="{StaticResource DockButtonStyle}">
+                                        <Path Data="{StaticResource WeatherIconPartly}"
+                                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ButtonBase}}"
+                                              StrokeThickness="1.4"
+                                              StrokeLineJoin="Round"
+                                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Width="13" Height="13" Stretch="Uniform" />
+                                    </RadioButton>
                                 </UniformGrid>
                             </Grid>
                         </Border>
@@ -765,6 +886,28 @@
                 </Grid>
             </Grid>
         </Border>
+
+        <!-- Idle notch top flare. These wings sit OUTSIDE IslandSurface (same as the battery
+             outline) so the border's clip can never cut them; they are bound to the island's
+             animated size and follow it while it shrinks/grows. -->
+        <Grid x:Name="IdleNotchFlareLayer"
+              Visibility="Collapsed"
+              IsHitTestVisible="False"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Width="{Binding ActualWidth, ElementName=IslandSurface}"
+              Height="{Binding ActualHeight, ElementName=IslandSurface}">
+            <Path x:Name="IdleNotchFlareLeft"
+                  Fill="{StaticResource IslandBackground}"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Top"
+                  IsHitTestVisible="False" />
+            <Path x:Name="IdleNotchFlareRight"
+                  Fill="{StaticResource IslandBackground}"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Top"
+                  IsHitTestVisible="False" />
+        </Grid>
 
         <!-- Idle notch battery indicator: lives OUTSIDE IslandSurface so the surface's
              size animation / ClipToBounds can never cut it. Fixed notch size, shown only

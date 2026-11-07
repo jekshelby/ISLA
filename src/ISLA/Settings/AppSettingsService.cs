@@ -12,6 +12,12 @@ public sealed class AppSettings
     public bool MediaEnabled { get; set; } = true;
     public bool QuickSettingsEnabled { get; set; } = true;
     public bool PomodoroEnabled { get; set; } = true;
+    public bool WeatherEnabled { get; set; } = true;
+    public string WeatherCity { get; set; } = string.Empty;
+    public string WeatherCountry { get; set; } = string.Empty;
+    public string WeatherTimeZone { get; set; } = string.Empty;
+    public double? WeatherLatitude { get; set; }
+    public double? WeatherLongitude { get; set; }
 }
 
 public sealed class AppSettingsService
