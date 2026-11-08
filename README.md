@@ -39,7 +39,8 @@ reminders, a game performance HUD, and Windows notification controls.
   frosted-glass background that blurs and tints the scene behind it. It updates
   every second, stays visible for the whole session, disappears when the game is
   closed or another window takes focus, and returns after banners or the open
-  menu; hovering or clicking the pill opens the menu. FPS comes from PresentMon
+  menu; in game mode the pill opens the menu on click, and hover stays passive
+  so it cannot interrupt play. FPS comes from PresentMon
   when it is available; otherwise the HUD shows `FPS --` while the system stats
   keep working.
 - Windows notification capture for apps such as Discord and Snipping Tool. Banners

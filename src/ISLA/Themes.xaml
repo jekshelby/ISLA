@@ -6,19 +6,12 @@
 
     <!-- ===== Brushes (frozen = cheaper to render) ===== -->
     <SolidColorBrush x:Key="IslandBackground"    Color="#050505" po:Freeze="True" />
-    <!-- Game HUD: translucent so the scene behind tints the pill; the diagonal shade
-         keeps white text readable on bright game areas. -->
-    <LinearGradientBrush x:Key="GameHudBackground" StartPoint="0,0" EndPoint="1,1" po:Freeze="True">
-        <GradientStop Color="#D8121A2E" Offset="0" />
-        <GradientStop Color="#C60A0B10" Offset="0.55" />
-        <GradientStop Color="#D81E1226" Offset="1" />
-    </LinearGradientBrush>
-    <!-- Dark tint over the blurred scene: frosted glass, still readable. -->
-    <LinearGradientBrush x:Key="GameHudGlassTint" StartPoint="0,0" EndPoint="1,1" po:Freeze="True">
-        <GradientStop Color="#C0131826" Offset="0" />
-        <GradientStop Color="#CC06070C" Offset="0.55" />
-        <GradientStop Color="#C4100F1A" Offset="1" />
-    </LinearGradientBrush>
+    <!-- Game HUD: plain translucent black, so the scene behind stays visible.
+         The glass layer adds the blur; this is also the fallback when capture
+         exclusion is unavailable. -->
+    <SolidColorBrush x:Key="GameHudBackground" Color="#B3000000" po:Freeze="True" />
+    <!-- Flat black tint over the blurred scene: same see-through look. -->
+    <SolidColorBrush x:Key="GameHudGlassTint" Color="#B3000000" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandSurface"       Color="#0B0B0B" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCard"          Color="#0F0F10" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCardHover"     Color="#161618" po:Freeze="True" />

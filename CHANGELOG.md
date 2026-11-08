@@ -10,8 +10,8 @@
 - The pill measures its text and only takes the room it needs (capped at 540 px),
   then grows or shrinks smoothly as the numbers change.
 - The background is frosted glass: the pill samples the scene behind it, blurs
-  it, and lays a dark tint on top so the stats stay readable on bright scenes.
-  Banners and the expanded menu keep the solid background.
+  it, and lays a flat translucent black tint on top so the stats stay readable
+  on bright scenes. Banners and the expanded menu keep the solid background.
 - The HUD samples once per second and stays visible for the whole game session.
   Focused banners and the expanded menu take priority; the HUD returns when they
   finish. Closing the game or switching to another window hides it.
@@ -33,8 +33,9 @@
   reused while ISLA itself has focus (opening the menu).
 - Entering a game no longer drops back to the plain dynamic island after the
   menu is opened; the HUD returns as soon as the menu collapses.
-- Hovering the game pill opens the menu again, and a click always opens it even
-  when the pointer was already resting on the pill before the HUD appeared.
+- The game pill opens the menu on click only, so hovering across the top of the
+  screen no longer pulls the menu over the game. A click still works even when
+  the pointer was already resting on the pill before the HUD appeared.
 
 ### Install
 

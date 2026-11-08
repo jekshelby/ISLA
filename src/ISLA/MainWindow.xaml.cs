@@ -2883,7 +2883,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_isPinned)
+        // In game mode the pill is deliberately click-only: moving the pointer across the
+        // top of the screen must not interrupt the game with the full menu.
+        if (!_isPinned && !_gameHudVisible)
         {
             SetExpanded(true);
         }
