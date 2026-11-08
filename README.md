@@ -35,12 +35,13 @@ reminders, a game performance HUD, and Windows notification controls.
   banner returns after the menu is closed if it was not acknowledged.
 - Game HUD: when a full-screen or borderless game is in the foreground, the island
   becomes a live stats bar showing FPS, CPU, RAM, GPU, and VRAM. The pill hugs
-  its text (up to 540 px) and resizes smoothly as the readings change, with a
-  translucent gradient that picks up the scene behind it. It updates every
-  second, stays visible for the whole session, disappears when the game is
+  its text (up to 540 px) and resizes smoothly as the readings change, over a
+  frosted-glass background that blurs and tints the scene behind it. It updates
+  every second, stays visible for the whole session, disappears when the game is
   closed or another window takes focus, and returns after banners or the open
-  menu. FPS comes from PresentMon when it is available; otherwise the HUD shows
-  `FPS --` while the system stats keep working.
+  menu; hovering or clicking the pill opens the menu. FPS comes from PresentMon
+  when it is available; otherwise the HUD shows `FPS --` while the system stats
+  keep working.
 - Windows notification capture for apps such as Discord and Snipping Tool. Banners
   stay one line tall: app icon in a circle, app name, then the message. The pill
   only grows wider (up to 20% past the old banner width) and trims long text; the

@@ -34,7 +34,7 @@ public sealed record GameStatsSnapshot(
 /// </summary>
 public sealed class GameStatsService : IDisposable
 {
-    private sealed record GameTarget(int ProcessId, string ProcessName, string Title);
+    private sealed record GameTarget(int ProcessId, string ProcessName, string Title, IntPtr Window);
 
     private static readonly HashSet<string> ExcludedProcesses = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -52,7 +52,6 @@ public sealed class GameStatsService : IDisposable
 
     private const int DwmwaExtendedFrameBounds = 9;
     private const uint MonitorDefaultToNearest = 2;
-    private const int QunsRunningD3DFullScreen = 3;
     private const uint PdhFmtDouble = 0x00000200;
     private const uint PdhFmtNoCap100 = 0x00008000;
     private const uint PdhMoreData = 0x800007D2;
@@ -67,6 +66,8 @@ public sealed class GameStatsService : IDisposable
     private bool _presentMonUnavailable;
     private int _gameProcessId;
     private string _gameProcessName = string.Empty;
+    private GameTarget? _lastGame;
+    private bool _lastSampleWasGame;
     private DateTime _lastPresentMonAttemptUtc;
     private double _lastFrameTime;
 
@@ -84,6 +85,7 @@ public sealed class GameStatsService : IDisposable
     public GameStatsSnapshot? Sample()
     {
         var target = FindForegroundGame();
+        _lastSampleWasGame = target is not null;
         if (target is null)
         {
             StopPresentMon();
@@ -131,21 +133,28 @@ public sealed class GameStatsService : IDisposable
     //  Game detection
     // =================================================================================
 
-    private static GameTarget? FindForegroundGame()
+    private GameTarget? FindForegroundGame()
     {
         var foreground = GetForegroundWindow();
-        if (foreground == IntPtr.Zero || IsIconic(foreground))
+        if (foreground == IntPtr.Zero)
         {
             return null;
         }
 
         GetWindowThreadProcessId(foreground, out var processId);
-        if (processId == 0 || processId == (uint)Environment.ProcessId)
+        if (processId == 0)
         {
             return null;
         }
 
-        if (!IsWindowGameLike(foreground))
+        // Opening the ISLA menu makes our own window the foreground window. That must not end
+        // the session: the game is still full screen on the same monitor behind the island.
+        if (processId == (uint)Environment.ProcessId)
+        {
+            return _lastSampleWasGame ? ReuseLastGame() : null;
+        }
+
+        if (IsIconic(foreground) || !CoversMonitor(foreground))
         {
             return null;
         }
@@ -160,7 +169,13 @@ public sealed class GameStatsService : IDisposable
             }
 
             var title = process.MainWindowTitle;
-            return new GameTarget((int)processId, name, string.IsNullOrWhiteSpace(title) ? name : title);
+            var target = new GameTarget(
+                (int)processId,
+                name,
+                string.IsNullOrWhiteSpace(title) ? name : title,
+                foreground);
+            _lastGame = target;
+            return target;
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or
                                               System.ComponentModel.Win32Exception)
@@ -169,15 +184,40 @@ public sealed class GameStatsService : IDisposable
         }
     }
 
-    private static bool IsWindowGameLike(IntPtr window)
+    /// <summary>
+    /// The game is still the window behind the island when ISLA has focus. Reuse it only while
+    /// it is alive and still covering its monitor, so closing the game ends the session.
+    /// </summary>
+    private GameTarget? ReuseLastGame()
     {
-        // Windows reports this while a Direct3D app is running full screen. Borderless games
-        // fall back to the geometry check below.
-        if (SHQueryUserNotificationState(out var state) == 0 && state == QunsRunningD3DFullScreen)
+        if (_lastGame is not { } game)
         {
-            return true;
+            return null;
         }
 
+        try
+        {
+            using var process = Process.GetProcessById(game.ProcessId);
+            if (process.HasExited || game.Window == IntPtr.Zero ||
+                !IsWindow(game.Window) || IsIconic(game.Window) ||
+                !CoversMonitor(game.Window))
+            {
+                _lastGame = null;
+                return null;
+            }
+
+            return game;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or
+                                              System.ComponentModel.Win32Exception)
+        {
+            _lastGame = null;
+            return null;
+        }
+    }
+
+    private static bool CoversMonitor(IntPtr window)
+    {
         var monitor = MonitorFromWindow(window, MonitorDefaultToNearest);
         var info = new MonitorInfo { Size = (uint)Marshal.SizeOf<MonitorInfo>() };
         if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info))
@@ -707,6 +747,9 @@ public sealed class GameStatsService : IDisposable
     private static extern bool IsIconic(IntPtr window);
 
     [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
@@ -717,9 +760,6 @@ public sealed class GameStatsService : IDisposable
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr window, int attribute, out Rect value, int size);
-
-    [DllImport("shell32.dll")]
-    private static extern int SHQueryUserNotificationState(out int state);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetSystemTimes(out FileTime idleTime, out FileTime kernelTime, out FileTime userTime);

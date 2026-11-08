@@ -13,6 +13,12 @@
         <GradientStop Color="#C60A0B10" Offset="0.55" />
         <GradientStop Color="#D81E1226" Offset="1" />
     </LinearGradientBrush>
+    <!-- Dark tint over the blurred scene: frosted glass, still readable. -->
+    <LinearGradientBrush x:Key="GameHudGlassTint" StartPoint="0,0" EndPoint="1,1" po:Freeze="True">
+        <GradientStop Color="#C0131826" Offset="0" />
+        <GradientStop Color="#CC06070C" Offset="0.55" />
+        <GradientStop Color="#C4100F1A" Offset="1" />
+    </LinearGradientBrush>
     <SolidColorBrush x:Key="IslandSurface"       Color="#0B0B0B" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCard"          Color="#0F0F10" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCardHover"     Color="#161618" po:Freeze="True" />

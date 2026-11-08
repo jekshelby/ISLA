@@ -62,9 +62,11 @@ public partial class MainWindow : Window
     private const double GameHudMaxWidth = 540;
     private const double GameHudHorizontalPadding = 10;
     private const string GameHudIconGlyph = "\uE7FC";
-    private const string GameHudLabel = "GAME";
-    private const double GameHudIconGap = 6;
-    private const double GameHudLabelGap = 8;
+    private const double GameHudIconGap = 8;
+
+    // Frosted glass: screen pixels around the pill, blurred, behind the stats.
+    private const double GameHudGlassMargin = 24;
+    private const int GameHudGlassIntervalMs = 110;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     // Wider notch used while media plays: clock on the left, spectrum on the right.
     private const double IdleMusicNotchWidth = 82;
@@ -288,6 +290,9 @@ public partial class MainWindow : Window
     private GameStatsSnapshot? _lastGameStats;
     private bool _gameHudActive;
     private bool _gameHudVisible;
+    private DateTime _gameHudGlassWarmupUtc;
+    private bool _gameHudGlassActive;
+    private readonly DispatcherTimer _gameHudGlassTimer;
 
     public MainWindow()
     {
@@ -317,6 +322,8 @@ public partial class MainWindow : Window
         _reminderTimer.Tick += ReminderTimer_Tick;
         _gameStatsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _gameStatsTimer.Tick += GameStatsTimer_Tick;
+        _gameHudGlassTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(GameHudGlassIntervalMs) };
+        _gameHudGlassTimer.Tick += GameHudGlassTimer_Tick;
         _pomodoroTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _pomodoroTimer.Tick += PomodoroTimer_Tick;
         _systemStateTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
@@ -2892,6 +2899,26 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// A click must always open the menu, even when the pointer was already resting on the
+    /// pill before the game HUD appeared (no MouseEnter fires in that case).
+    /// </summary>
+    private void Island_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left || _isPinned || _isExpanded)
+        {
+            return;
+        }
+
+        if (_isIdleNotch)
+        {
+            ExitIdleNotch();
+            return;
+        }
+
+        SetExpanded(true);
+    }
+
     private void IdleTimer_Tick(object? sender, EventArgs e)
     {
         if (_isIdleNotch || _isExpanded || NodeNotificationContent.Visibility == Visibility.Visible ||
@@ -3214,6 +3241,7 @@ public partial class MainWindow : Window
         IslandSurface.Padding = new Thickness(GameHudHorizontalPadding, 0, GameHudHorizontalPadding, 0);
         CompactContent.Visibility = Visibility.Visible;
         GameStatsContent.Visibility = Visibility.Visible;
+        StartGameHudGlass();
     }
 
     /// <summary>Measures the game row so the pill only takes the room its text needs.</summary>
@@ -3222,8 +3250,6 @@ public partial class MainWindow : Window
         var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         var content = MeasureNotificationText(GameHudIconGlyph, GameHudIconText, pixelsPerDip) +
                       GameHudIconGap +
-                      MeasureNotificationText(GameHudLabel, GameHudLabelText, pixelsPerDip) +
-                      GameHudLabelGap +
                       MeasureNotificationText(text, GameStatsText, pixelsPerDip);
 
         // A few pixels of slack keep tabular figures and rounding from trimming the last digit.
@@ -3273,6 +3299,7 @@ public partial class MainWindow : Window
         }
 
         _gameHudVisible = false;
+        StopGameHudGlass();
         IslandSurface.Background = _normalIslandBackground;
         GameStatsContent.BeginAnimation(OpacityProperty, null);
         GameStatsContent.Visibility = Visibility.Collapsed;
@@ -3323,6 +3350,206 @@ public partial class MainWindow : Window
         CompactSpectrum.Visibility = _spectrumActive ? Visibility.Visible : Visibility.Collapsed;
         CompactBatteryPercentText.Visibility = _spectrumActive ? Visibility.Collapsed : Visibility.Visible;
         GameStatsContent.Visibility = Visibility.Collapsed;
+    }
+
+    // =================================================================================
+    //  Game HUD glass
+    // =================================================================================
+
+    private void IslandSurface_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (_gameHudVisible)
+        {
+            UpdateGameHudGlassClip();
+        }
+    }
+
+    private void StartGameHudGlass()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        // Keep this window out of the screen grab, otherwise the pill would sample itself.
+        // Some remote/older drivers refuse the affinity; fall back to the gradient.
+        if (handle == IntPtr.Zero || !SetWindowDisplayAffinity(handle, WdaExcludeFromCapture))
+        {
+            _gameHudGlassActive = false;
+            _gameHudGlassTimer.Stop();
+            GameHudGlassImage.Source = null;
+            GameHudGlassLayer.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        _gameHudGlassActive = true;
+        GameHudGlassLayer.Visibility = Visibility.Visible;
+        UpdateGameHudGlassClip();
+        // Give DWM a moment to apply the affinity before the first capture.
+        _gameHudGlassWarmupUtc = DateTime.UtcNow.AddMilliseconds(220);
+        _gameHudGlassTimer.Start();
+    }
+
+    private void StopGameHudGlass()
+    {
+        _gameHudGlassTimer.Stop();
+        GameHudGlassImage.Source = null;
+        GameHudGlassLayer.Visibility = Visibility.Collapsed;
+        GameHudGlassLayer.Clip = null;
+        if (!_gameHudGlassActive)
+        {
+            return;
+        }
+
+        _gameHudGlassActive = false;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle != IntPtr.Zero)
+        {
+            SetWindowDisplayAffinity(handle, WdaNone);
+        }
+    }
+
+    /// <summary>Rounds the glass layer to the pill's silhouette; Border alone only clips a
+    /// rectangle, which would square off the frosted corners.</summary>
+    private void UpdateGameHudGlassClip()
+    {
+        if (!_gameHudVisible)
+        {
+            GameHudGlassLayer.Clip = null;
+            return;
+        }
+
+        var width = IslandSurface.ActualWidth;
+        var height = IslandSurface.ActualHeight;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var padding = IslandSurface.Padding;
+        var radius = IslandRadius;
+        GameHudGlassLayer.Clip = new RectangleGeometry(
+            new Rect(-padding.Left, -padding.Top, width, height),
+            radius,
+            radius);
+    }
+
+    private void GameHudGlassTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_gameHudVisible || _isExpanded || _nodeNotificationActive ||
+            DateTime.UtcNow < _gameHudGlassWarmupUtc)
+        {
+            return;
+        }
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        // PointToScreen is already in device pixels (DIP only on a 100% display), while the
+        // island's ActualWidth/Height and the margin are DIP and need scaling.
+        var origin = IslandSurface.PointToScreen(new System.Windows.Point(0, 0));
+        var x = (int)Math.Floor(origin.X - (GameHudGlassMargin * dpi.DpiScaleX));
+        var y = (int)Math.Floor(origin.Y - (GameHudGlassMargin * dpi.DpiScaleY));
+        var width = (int)Math.Ceiling((IslandSurface.ActualWidth + (GameHudGlassMargin * 2)) * dpi.DpiScaleX);
+        var height = (int)Math.Ceiling((IslandSurface.ActualHeight + (GameHudGlassMargin * 2)) * dpi.DpiScaleY);
+
+        var frame = CaptureScreenArea(x, y, width, height, dpi.DpiScaleX, dpi.DpiScaleY);
+        if (frame is not null)
+        {
+            GameHudGlassImage.Source = frame;
+        }
+    }
+
+    /// <summary>
+    /// Grabs a rectangle of the composited desktop behind the island. This window is excluded
+    /// from capture while the pill is visible, so the scene behind it comes through untouched.
+    /// </summary>
+    private static System.Windows.Media.Imaging.BitmapSource? CaptureScreenArea(
+        int x, int y, int width, int height, double dpiScaleX, double dpiScaleY)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        var screenDc = GetDC(IntPtr.Zero);
+        if (screenDc == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        var memoryDc = CreateCompatibleDC(screenDc);
+        if (memoryDc == IntPtr.Zero)
+        {
+            _ = ReleaseDC(IntPtr.Zero, screenDc);
+            return null;
+        }
+
+        IntPtr dib = IntPtr.Zero;
+        IntPtr previous = IntPtr.Zero;
+        try
+        {
+            var info = new BitmapInfo
+            {
+                Header = new BitmapInfoHeader
+                {
+                    Size = Marshal.SizeOf<BitmapInfoHeader>(),
+                    Width = width,
+                    Height = -height,
+                    Planes = 1,
+                    BitCount = 32,
+                    Compression = 0
+                }
+            };
+
+            dib = CreateDIBSection(memoryDc, ref info, DibRgbColors, out var bits, IntPtr.Zero, 0);
+            if (dib == IntPtr.Zero || bits == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            previous = SelectObject(memoryDc, dib);
+            if (!BitBlt(memoryDc, 0, 0, width, height, screenDc, x, y, SrcCopy))
+            {
+                return null;
+            }
+
+            var stride = width * 4;
+            var pixels = new byte[stride * height];
+            Marshal.Copy(bits, pixels, 0, pixels.Length);
+
+            var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(
+                width,
+                height,
+                96 * dpiScaleX,
+                96 * dpiScaleY,
+                PixelFormats.Bgra32,
+                null,
+                pixels,
+                stride);
+            bitmap.Freeze();
+
+            // A quarter-resolution sample plus the Gaussian blur reads as frosted glass
+            // rather than a merely softened copy of the scene.
+            var small = new System.Windows.Media.Imaging.TransformedBitmap(
+                bitmap,
+                new ScaleTransform(0.25, 0.25));
+            small.Freeze();
+            return small;
+        }
+        catch (Exception exception) when (exception is ArgumentException or OutOfMemoryException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (previous != IntPtr.Zero)
+            {
+                _ = SelectObject(memoryDc, previous);
+            }
+
+            if (dib != IntPtr.Zero)
+            {
+                _ = DeleteObject(dib);
+            }
+
+            _ = DeleteDC(memoryDc);
+            _ = ReleaseDC(IntPtr.Zero, screenDc);
+        }
     }
 
     // =================================================================================
@@ -3489,6 +3716,7 @@ public partial class MainWindow : Window
         _nodeNotificationTimer.Stop();
         _idleTimer.Stop();
         _gameStatsTimer.Stop();
+        _gameHudGlassTimer.Stop();
         _gameStatsService.Dispose();
         _windowsNotificationService.Dispose();
         _trayIcon.Visible = false;
@@ -4267,6 +4495,66 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int keyCode);
+
+    // ---- Screen capture for the frosted game HUD ------------------------------------
+
+    private const uint WdaNone = 0;
+    private const uint WdaExcludeFromCapture = 0x00000011;
+    private const uint DibRgbColors = 0;
+    private const int SrcCopy = 0x00CC0020;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfoHeader
+    {
+        public int Size;
+        public int Width;
+        public int Height;
+        public short Planes;
+        public short BitCount;
+        public int Compression;
+        public int SizeImage;
+        public int XPelsPerMeter;
+        public int YPelsPerMeter;
+        public int ClrUsed;
+        public int ClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BitmapInfo
+    {
+        public BitmapInfoHeader Header;
+        public uint Colors;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr window, IntPtr dc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateDIBSection(
+        IntPtr dc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr dc, IntPtr gdiObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(
+        IntPtr destination, int x, int y, int width, int height,
+        IntPtr source, int sourceX, int sourceY, int rasterOperation);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr gdiObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr dc);
 
     // =================================================================================
     //  Animation / text helpers

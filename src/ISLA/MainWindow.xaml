@@ -36,9 +36,28 @@
                 Padding="5,0"
                 ClipToBounds="True"
                 MouseEnter="Island_MouseEnter"
-                MouseLeave="Island_MouseLeave">
+                MouseLeave="Island_MouseLeave"
+                MouseLeftButtonUp="Island_MouseLeftButtonUp"
+                SizeChanged="IslandSurface_SizeChanged">
 
             <Grid>
+                <!-- Frosted glass behind the game stats: a blurred snapshot of the scene
+                     behind the pill, captured with this window excluded from the grab. -->
+                <Grid x:Name="GameHudGlassLayer"
+                      Visibility="Collapsed"
+                      IsHitTestVisible="False">
+                    <Image x:Name="GameHudGlassImage"
+                           Stretch="Fill"
+                           Margin="-24,-24,-24,-24"
+                           Opacity="0.9">
+                        <Image.Effect>
+                            <BlurEffect Radius="16" KernelType="Gaussian" />
+                        </Image.Effect>
+                    </Image>
+                    <Border Margin="-10,0,-10,0"
+                            Background="{StaticResource GameHudGlassTint}" />
+                </Grid>
+
                 <!-- ============ COMPACT ============ -->
                 <Grid x:Name="CompactContent"
                       Width="170"
@@ -183,7 +202,7 @@
                         </StackPanel>
                     </Grid>
                     <!-- Single row while a full-screen game is in the foreground:
-                         gamepad | GAME | live FPS / CPU / RAM / GPU / VRAM. -->
+                         gamepad | live FPS / CPU / RAM / GPU / VRAM. -->
                     <Grid x:Name="GameStatsContent"
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
@@ -197,14 +216,6 @@
                                        FontSize="13"
                                        Foreground="{StaticResource IslandAccent}"
                                        VerticalAlignment="Center" />
-                            <TextBlock x:Name="GameHudLabelText"
-                                       Text="GAME"
-                                       Style="{StaticResource ContentSubtitleStyle}"
-                                       Foreground="{StaticResource IslandAccent}"
-                                       FontSize="10"
-                                       FontWeight="Bold"
-                                       VerticalAlignment="Center"
-                                       Margin="6,0,0,0" />
                             <TextBlock x:Name="GameStatsText"
                                        Style="{StaticResource ContentSubtitleStyle}"
                                        Foreground="{StaticResource IslandText}"

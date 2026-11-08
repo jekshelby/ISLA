@@ -5,12 +5,12 @@
 ### Added
 
 - Game HUD: when a full-screen or borderless game takes the foreground, the
-  dynamic island turns into a single-line stats bar with a gamepad icon, a `GAME`
-  label, and live FPS, CPU, RAM, GPU, and VRAM readings.
+  dynamic island turns into a single-line stats bar with a gamepad icon and live
+  FPS, CPU, RAM, GPU, and VRAM readings.
 - The pill measures its text and only takes the room it needs (capped at 540 px),
   then grows or shrinks smoothly as the numbers change.
-- While the HUD is visible the island background becomes a translucent diagonal
-  gradient, so the colours of the game behind tint the pill from moment to moment.
+- The background is frosted glass: the pill samples the scene behind it, blurs
+  it, and lays a dark tint on top so the stats stay readable on bright scenes.
   Banners and the expanded menu keep the solid background.
 - The HUD samples once per second and stays visible for the whole game session.
   Focused banners and the expanded menu take priority; the HUD returns when they
@@ -25,6 +25,16 @@
   replaced by the battery notch after 30 seconds of no interaction.
 - Media continues to play during a game without covering the HUD with the compact
   spectrum; the spectrum returns with the clock when the game closes.
+
+### Fixed
+
+- The HUD no longer sticks around after switching to another app: a window only
+  counts as a game while it covers its whole monitor, and the last game is only
+  reused while ISLA itself has focus (opening the menu).
+- Entering a game no longer drops back to the plain dynamic island after the
+  menu is opened; the HUD returns as soon as the menu collapses.
+- Hovering the game pill opens the menu again, and a click always opens it even
+  when the pointer was already resting on the pill before the HUD appeared.
 
 ### Install
 
