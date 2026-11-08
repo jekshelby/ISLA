@@ -63,6 +63,10 @@ public partial class MainWindow : Window
     private const double GameHudHorizontalPadding = 10;
     private const string GameHudIconGlyph = "\uE7FC";
     private const double GameHudIconGap = 8;
+    // Game mode attaches to the screen edge like a notch: flat top, rounded bottom and a
+    // slimmer body so it covers as little of the game's own top bar as possible.
+    private const double GameHudHeight = 22;
+    private const double GameHudRadius = GameHudHeight / 2;
 
     // Frosted glass: screen pixels around the pill, blurred, behind the stats.
     private const double GameHudGlassMargin = 24;
@@ -133,7 +137,8 @@ public partial class MainWindow : Window
             // corners animate. Until then the pill keeps its rounded top while it shrinks.
             var flared = window._isIdleNotch &&
                 window.IdleNotchFlareLayer.Visibility == Visibility.Visible;
-            window.IslandSurface.CornerRadius = flared
+            var notched = window._gameHudNotch;
+            window.IslandSurface.CornerRadius = flared || notched
                 ? new CornerRadius(0, 0, radius, radius)
                 : new CornerRadius(radius);
         }
@@ -290,6 +295,7 @@ public partial class MainWindow : Window
     private GameStatsSnapshot? _lastGameStats;
     private bool _gameHudActive;
     private bool _gameHudVisible;
+    private bool _gameHudNotch;
     private DateTime _gameHudGlassWarmupUtc;
     private bool _gameHudGlassActive;
     private readonly DispatcherTimer _gameHudGlassTimer;
@@ -3223,9 +3229,10 @@ public partial class MainWindow : Window
     /// Swaps the compact row for the game stats without touching the pill width. Used when the
     /// menu collapses straight back into the HUD, so the clock never flashes in between.
     /// </summary>
-    private void PrepareGameHudContent()
+    private void PrepareGameHudContent(bool setGeometry = true)
     {
         _gameHudVisible = true;
+        _gameHudNotch = true;
         // Translucent while gaming: the scene behind tints the pill from moment to moment.
         IslandSurface.Background = _gameHudBackground;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
@@ -3237,6 +3244,18 @@ public partial class MainWindow : Window
         if (_lastGameStats is not null)
         {
             SetGameHudText(_lastGameStats);
+        }
+
+        if (setGeometry)
+        {
+            // Attach to the top edge: flat top corners, rounded bottom, slimmer body.
+            var duration = TimeSpan.FromMilliseconds(220);
+            IslandSurface.BeginAnimation(HeightProperty, MakeAnimation(GameHudHeight, duration, CollapseEase));
+            BeginAnimation(IslandRadiusProperty, MakeAnimation(GameHudRadius, duration, CollapseEase));
+            if (Math.Abs(Top - SystemParameters.WorkArea.Top) > 0.5)
+            {
+                AnimateWindowTop(SystemParameters.WorkArea.Top, duration, CollapseEase);
+            }
         }
 
         CompactContent.Width = GetGameHudWidth(GameStatsText.Text) - (GameHudHorizontalPadding * 2);
@@ -3293,7 +3312,7 @@ public partial class MainWindow : Window
         IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
-    private void HideGameHud(bool restoreSize)
+    private void HideGameHud(bool restoreSize, bool resetGeometry = true)
     {
         if (!_gameHudVisible)
         {
@@ -3301,18 +3320,37 @@ public partial class MainWindow : Window
         }
 
         _gameHudVisible = false;
+        _gameHudNotch = false;
         StopGameHudGlass();
         IslandSurface.Background = _normalIslandBackground;
         GameStatsContent.BeginAnimation(OpacityProperty, null);
         GameStatsContent.Visibility = Visibility.Collapsed;
 
-        // A banner or the open menu owns the layout and restores the compact row itself.
-        if (_nodeNotificationActive || _isExpanded)
+        // The open menu owns the layout; a banner still needs the normal compact shell
+        // (its comment assumes the pill is back at the standard 30 px inset).
+        if (_isExpanded)
         {
             return;
         }
 
         RestoreCompactShell();
+
+        if (resetGeometry)
+        {
+            // Detach from the screen edge and return to the normal floating pill. When the
+            // menu is opening the expand animation does this itself, so the notch does not
+            // pop down to the compact height first.
+            IslandSurface.BeginAnimation(HeightProperty, null);
+            IslandSurface.Height = CompactHeight;
+            BeginAnimation(IslandRadiusProperty, null);
+            IslandRadius = CompactRadius;
+            if (Math.Abs(Top - (SystemParameters.WorkArea.Top + NormalTopInset)) > 0.5)
+            {
+                AnimateWindowTop(SystemParameters.WorkArea.Top + NormalTopInset,
+                    TimeSpan.FromMilliseconds(220), CollapseEase);
+            }
+        }
+
         if (!restoreSize)
         {
             return;
@@ -3426,10 +3464,48 @@ public partial class MainWindow : Window
 
         var padding = IslandSurface.Padding;
         var radius = IslandRadius;
-        GameHudGlassLayer.Clip = new RectangleGeometry(
-            new Rect(-padding.Left, -padding.Top, width, height),
-            radius,
-            radius);
+        var bounds = new Rect(-padding.Left, -padding.Top, width, height);
+        GameHudGlassLayer.Clip = _gameHudNotch
+            ? CreateNotchClip(bounds, radius)
+            : new RectangleGeometry(bounds, radius, radius);
+    }
+
+    /// <summary>Notch silhouette: square top corners at the screen edge, rounded bottom.</summary>
+    private static Geometry CreateNotchClip(Rect bounds, double radius)
+    {
+        radius = Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2);
+        var geometry = new StreamGeometry();
+        using (var context = geometry.Open())
+        {
+            var topLeft = new System.Windows.Point(bounds.Left, bounds.Top);
+            var topRight = new System.Windows.Point(bounds.Right, bounds.Top);
+            var bottomRight = new System.Windows.Point(bounds.Right, bounds.Bottom);
+            var bottomLeft = new System.Windows.Point(bounds.Left, bounds.Bottom);
+
+            context.BeginFigure(topLeft, isFilled: true, isClosed: true);
+            context.LineTo(topRight, isStroked: false, isSmoothJoin: false);
+            context.LineTo(new System.Windows.Point(bottomRight.X, bottomRight.Y - radius), false, false);
+            context.ArcTo(
+                new System.Windows.Point(bottomRight.X - radius, bottomRight.Y),
+                new System.Windows.Size(radius, radius),
+                0,
+                isLargeArc: false,
+                SweepDirection.Clockwise,
+                isStroked: false,
+                isSmoothJoin: false);
+            context.LineTo(new System.Windows.Point(bottomLeft.X + radius, bottomLeft.Y), false, false);
+            context.ArcTo(
+                new System.Windows.Point(bottomLeft.X, bottomLeft.Y - radius),
+                new System.Windows.Size(radius, radius),
+                0,
+                isLargeArc: false,
+                SweepDirection.Clockwise,
+                isStroked: false,
+                isSmoothJoin: false);
+        }
+
+        geometry.Freeze();
+        return geometry;
     }
 
     private void GameHudGlassTimer_Tick(object? sender, EventArgs e)
@@ -3447,7 +3523,8 @@ public partial class MainWindow : Window
         var x = (int)Math.Floor(origin.X - (GameHudGlassMargin * dpi.DpiScaleX));
         var y = (int)Math.Floor(origin.Y - (GameHudGlassMargin * dpi.DpiScaleY));
         var width = (int)Math.Ceiling((IslandSurface.ActualWidth + (GameHudGlassMargin * 2)) * dpi.DpiScaleX);
-        var height = (int)Math.Ceiling((IslandSurface.ActualHeight + (GameHudGlassMargin * 2)) * dpi.DpiScaleY);
+        var height = (int)Math.Ceiling(
+            (IslandSurface.ActualHeight + (GameHudGlassMargin * 2)) * dpi.DpiScaleY);
 
         var frame = CaptureScreenArea(x, y, width, height, dpi.DpiScaleX, dpi.DpiScaleY);
         if (frame is not null)
@@ -3505,7 +3582,27 @@ public partial class MainWindow : Window
             }
 
             previous = SelectObject(memoryDc, dib);
-            if (!BitBlt(memoryDc, 0, 0, width, height, screenDc, x, y, SrcCopy))
+
+            // The notch sits on the screen edge, so part of the sampled rectangle can be off
+            // screen. Clamp the grab and replicate edge pixels into the padding; leaving
+            // transparent rows there would make the blur darken the whole notch.
+            var screenWidth = GetSystemMetrics(SmCxScreen);
+            var screenHeight = GetSystemMetrics(SmCyScreen);
+            var sourceX = Math.Max(0, x);
+            var sourceY = Math.Max(0, y);
+            var sourceRight = Math.Min(screenWidth, x + width);
+            var sourceBottom = Math.Min(screenHeight, y + height);
+            var copyWidth = sourceRight - sourceX;
+            var copyHeight = sourceBottom - sourceY;
+            if (copyWidth <= 0 || copyHeight <= 0)
+            {
+                return null;
+            }
+
+            var destinationX = sourceX - x;
+            var destinationY = sourceY - y;
+            if (!BitBlt(memoryDc, destinationX, destinationY, copyWidth, copyHeight,
+                    screenDc, sourceX, sourceY, SrcCopy))
             {
                 return null;
             }
@@ -3513,6 +3610,7 @@ public partial class MainWindow : Window
             var stride = width * 4;
             var pixels = new byte[stride * height];
             Marshal.Copy(bits, pixels, 0, pixels.Length);
+            ExtendEdges(pixels, width, height, destinationX, destinationY, copyWidth, copyHeight);
 
             var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(
                 width,
@@ -3554,6 +3652,40 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Replicates the captured edge pixels into the off-screen padding so a blur
+    /// near the screen edge fades into the scene instead of into transparency.</summary>
+    private static void ExtendEdges(
+        byte[] pixels, int width, int height,
+        int left, int top, int copyWidth, int copyHeight)
+    {
+        var stride = width * 4;
+        var right = left + copyWidth;
+        var bottom = top + copyHeight;
+        for (var row = 0; row < top; row++)
+        {
+            Array.Copy(pixels, top * stride, pixels, row * stride, stride);
+        }
+
+        for (var row = bottom; row < height; row++)
+        {
+            Array.Copy(pixels, (bottom - 1) * stride, pixels, row * stride, stride);
+        }
+
+        for (var row = 0; row < height; row++)
+        {
+            var offset = row * stride;
+            for (var column = 0; column < left; column++)
+            {
+                Array.Copy(pixels, offset + (left * 4), pixels, offset + (column * 4), 4);
+            }
+
+            for (var column = right; column < width; column++)
+            {
+                Array.Copy(pixels, offset + ((right - 1) * 4), pixels, offset + (column * 4), 4);
+            }
+        }
+    }
+
     // =================================================================================
     //  Expand / collapse
     // =================================================================================
@@ -3575,8 +3707,10 @@ public partial class MainWindow : Window
             ExitIdleNotch(animate: false, resetTop: false);
             if (_gameHudVisible)
             {
-                // The menu replaces the HUD; it comes back after the collapse.
-                HideGameHud(restoreSize: false);
+                // The menu replaces the HUD; it comes back after the collapse. The expand
+                // animation moves the notch to the menu geometry, so leave height/radius/top
+                // alone here.
+                HideGameHud(restoreSize: false, resetGeometry: false);
             }
 
             if (_nodeNotificationActive)
@@ -3621,7 +3755,9 @@ public partial class MainWindow : Window
         {
             if (!_gameHudVisible)
             {
-                PrepareGameHudContent();
+                // The collapse animation below already moves height, radius, and window top
+                // to the notch values, so only the content and glass need preparing here.
+                PrepareGameHudContent(setGeometry: false);
                 GameStatsContent.BeginAnimation(OpacityProperty, null);
                 GameStatsContent.Opacity = 1;
             }
@@ -3630,11 +3766,13 @@ public partial class MainWindow : Window
         }
 
         var targetWidth = expanded ? ExpandedWidth : (restoreGameHud ? gameHudWidth : CompactWidth);
-        var targetHeight = expanded ? GetTabHeight(_activeTab) : CompactHeight;
-        var targetRadius = expanded ? ExpandedRadius : CompactRadius;
+        var targetHeight = expanded ? GetTabHeight(_activeTab) : (restoreGameHud ? GameHudHeight : CompactHeight);
+        var targetRadius = expanded ? ExpandedRadius : (restoreGameHud ? GameHudRadius : CompactRadius);
         var duration = TimeSpan.FromMilliseconds(expanded ? 420 : 280);
         var ease = expanded ? ExpandEase : CollapseEase;
-        var targetTop = SystemParameters.WorkArea.Top + NormalTopInset;
+        var targetTop = restoreGameHud
+            ? SystemParameters.WorkArea.Top
+            : SystemParameters.WorkArea.Top + NormalTopInset;
         if (!expandingFromNotch && Math.Abs(Top - targetTop) > 0.5)
         {
             // Coming out of the idle notch: expand in place first (so the pointer stays over
@@ -4504,6 +4642,8 @@ public partial class MainWindow : Window
     private const uint WdaExcludeFromCapture = 0x00000011;
     private const uint DibRgbColors = 0;
     private const int SrcCopy = 0x00CC0020;
+    private const int SmCxScreen = 0;
+    private const int SmCyScreen = 1;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BitmapInfoHeader
@@ -4530,6 +4670,9 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowDisplayAffinity(IntPtr window, uint affinity);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetDC(IntPtr window);

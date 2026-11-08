@@ -9,6 +9,9 @@
   FPS, CPU, RAM, GPU, and VRAM readings.
 - The pill measures its text and only takes the room it needs (capped at 540 px),
   then grows or shrinks smoothly as the numbers change.
+- In game mode the pill attaches to the top edge of the screen as a notch: flat
+  top corners, rounded bottom, and a slim 22 px body, so it leaves the game's own
+  menu and top bar visible.
 - The background is frosted glass: the pill samples the scene behind it, blurs
   it, and lays a flat translucent black tint on top so the stats stay readable
   on bright scenes. Banners and the expanded menu keep the solid background.
