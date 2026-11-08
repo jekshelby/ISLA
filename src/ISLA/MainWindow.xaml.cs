@@ -58,9 +58,13 @@ public partial class MainWindow : Window
     private const double NotificationTextGap = 7;
     private const double NotificationAppMaxWidth = 150;
     private const double CompactHorizontalPadding = 5;
-    // Game HUD pill: wider than a notification so every stat fits on one line.
-    private const double GameHudWidth = 500;
+    // Game HUD pill: hugs its text, up to a notification-friendly maximum.
+    private const double GameHudMaxWidth = 540;
     private const double GameHudHorizontalPadding = 10;
+    private const string GameHudIconGlyph = "\uE7FC";
+    private const string GameHudLabel = "GAME";
+    private const double GameHudIconGap = 6;
+    private const double GameHudLabelGap = 8;
     private const double IdleNotchWidth = CompactWidth * 0.3;
     // Wider notch used while media plays: clock on the left, spectrum on the right.
     private const double IdleMusicNotchWidth = 82;
@@ -262,6 +266,8 @@ public partial class MainWindow : Window
     private bool _refreshingSettings;
     private System.Windows.Media.Brush _normalBatteryBrush = System.Windows.Media.Brushes.White;
     private readonly System.Windows.Media.Brush _lowBatteryBrush = Frozen(new SolidColorBrush(Colors.IndianRed));
+    private readonly Brush _normalIslandBackground;
+    private readonly Brush _gameHudBackground;
 
     // Battery colour by level: <=20 red, 21-29 yellow, >=30 green.
     private static readonly System.Windows.Media.Brush BatteryRedBrush = Frozen(new SolidColorBrush(System.Windows.Media.Color.FromRgb(0xFF, 0x45, 0x3A)));
@@ -290,6 +296,8 @@ public partial class MainWindow : Window
         InitializeIdleNotchFlare();
         InitializePomodoroUi();
         _normalBatteryBrush = (System.Windows.Media.Brush)FindResource("IslandAccent");
+        _normalIslandBackground = (Brush)FindResource("IslandBackground");
+        _gameHudBackground = (Brush)FindResource("GameHudBackground");
 
         _trayIconImage = LoadTrayIcon();
         _trayIcon = CreateTrayIcon();
@@ -3143,6 +3151,16 @@ public partial class MainWindow : Window
 
     private void UpdateGameHud(GameStatsSnapshot snapshot)
     {
+        SetGameHudText(snapshot);
+
+        if (_gameHudVisible && !_isExpanded && !_nodeNotificationActive)
+        {
+            ResizeGameHud(GetGameHudWidth(GameStatsText.Text));
+        }
+    }
+
+    private void SetGameHudText(GameStatsSnapshot snapshot)
+    {
         var text = snapshot.Describe();
         if (!string.Equals(GameStatsText.Text, text, StringComparison.Ordinal))
         {
@@ -3166,18 +3184,9 @@ public partial class MainWindow : Window
         }
 
         PrepareGameHudContent();
+        var targetWidth = GetGameHudWidth(GameStatsText.Text);
         GameStatsContent.Opacity = 0;
-
-        var animation = new DoubleAnimation
-        {
-            From = IslandSurface.Width,
-            To = GameHudWidth,
-            Duration = TimeSpan.FromMilliseconds(200),
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) => IslandSurface.Width = GameHudWidth;
-        IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
+        AnimateGameHudWidth(targetWidth, 220);
         GameStatsContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
     }
 
@@ -3188,22 +3197,72 @@ public partial class MainWindow : Window
     private void PrepareGameHudContent()
     {
         _gameHudVisible = true;
+        // Translucent while gaming: the scene behind tints the pill from moment to moment.
+        IslandSurface.Background = _gameHudBackground;
         CompactBatteryContent.Visibility = Visibility.Collapsed;
         ClockText.Visibility = Visibility.Collapsed;
         CompactSpectrum.Visibility = Visibility.Collapsed;
         IdlePomodoro.Visibility = Visibility.Collapsed;
         IdleSpectrum.Visibility = Visibility.Collapsed;
 
-        var contentWidth = GameHudWidth - (GameHudHorizontalPadding * 2);
-        GameStatsContent.Width = contentWidth;
-        CompactContent.Width = contentWidth;
+        if (_lastGameStats is not null)
+        {
+            SetGameHudText(_lastGameStats);
+        }
+
+        CompactContent.Width = GetGameHudWidth(GameStatsText.Text) - (GameHudHorizontalPadding * 2);
         IslandSurface.Padding = new Thickness(GameHudHorizontalPadding, 0, GameHudHorizontalPadding, 0);
         CompactContent.Visibility = Visibility.Visible;
         GameStatsContent.Visibility = Visibility.Visible;
-        if (_lastGameStats is not null)
+    }
+
+    /// <summary>Measures the game row so the pill only takes the room its text needs.</summary>
+    private double GetGameHudWidth(string text)
+    {
+        var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var content = MeasureNotificationText(GameHudIconGlyph, GameHudIconText, pixelsPerDip) +
+                      GameHudIconGap +
+                      MeasureNotificationText(GameHudLabel, GameHudLabelText, pixelsPerDip) +
+                      GameHudLabelGap +
+                      MeasureNotificationText(text, GameStatsText, pixelsPerDip);
+
+        // A few pixels of slack keep tabular figures and rounding from trimming the last digit.
+        return Math.Clamp(
+            Math.Ceiling(content) + 6 + (GameHudHorizontalPadding * 2),
+            NotificationMinWidth,
+            GameHudMaxWidth);
+    }
+
+    /// <summary>Grows or shrinks the pill for the new stats; small digit changes are ignored.</summary>
+    private void ResizeGameHud(double targetWidth)
+    {
+        if (Math.Abs(targetWidth - IslandSurface.Width) < 6)
         {
-            UpdateGameHud(_lastGameStats);
+            return;
         }
+
+        CompactContent.Width = targetWidth - (GameHudHorizontalPadding * 2);
+        AnimateGameHudWidth(targetWidth, 180);
+    }
+
+    private void AnimateGameHudWidth(double targetWidth, int milliseconds)
+    {
+        var animation = new DoubleAnimation
+        {
+            From = IslandSurface.Width,
+            To = targetWidth,
+            Duration = TimeSpan.FromMilliseconds(milliseconds),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            FillBehavior = FillBehavior.Stop
+        };
+        animation.Completed += (_, _) =>
+        {
+            if (_gameHudVisible)
+            {
+                IslandSurface.Width = targetWidth;
+            }
+        };
+        IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
     private void HideGameHud(bool restoreSize)
@@ -3214,6 +3273,7 @@ public partial class MainWindow : Window
         }
 
         _gameHudVisible = false;
+        IslandSurface.Background = _normalIslandBackground;
         GameStatsContent.BeginAnimation(OpacityProperty, null);
         GameStatsContent.Visibility = Visibility.Collapsed;
 
@@ -3255,6 +3315,7 @@ public partial class MainWindow : Window
     /// <summary>Puts the compact battery/clock row back after a banner or the game HUD.</summary>
     private void RestoreCompactShell()
     {
+        IslandSurface.Background = _normalIslandBackground;
         IslandSurface.Padding = new Thickness(CompactHorizontalPadding, 0, CompactHorizontalPadding, 0);
         CompactContent.Width = CompactWidth - (CompactHorizontalPadding * 2);
         CompactBatteryContent.Visibility = Visibility.Visible;
@@ -3326,14 +3387,20 @@ public partial class MainWindow : Window
                              _gameHudActive &&
                              _lastGameStats is not null &&
                              _notificationQueue.Count == 0;
-        if (restoreGameHud && !_gameHudVisible)
+        var gameHudWidth = 0.0;
+        if (restoreGameHud)
         {
-            PrepareGameHudContent();
-            GameStatsContent.BeginAnimation(OpacityProperty, null);
-            GameStatsContent.Opacity = 1;
+            if (!_gameHudVisible)
+            {
+                PrepareGameHudContent();
+                GameStatsContent.BeginAnimation(OpacityProperty, null);
+                GameStatsContent.Opacity = 1;
+            }
+
+            gameHudWidth = GetGameHudWidth(GameStatsText.Text);
         }
 
-        var targetWidth = expanded ? ExpandedWidth : (restoreGameHud ? GameHudWidth : CompactWidth);
+        var targetWidth = expanded ? ExpandedWidth : (restoreGameHud ? gameHudWidth : CompactWidth);
         var targetHeight = expanded ? GetTabHeight(_activeTab) : CompactHeight;
         var targetRadius = expanded ? ExpandedRadius : CompactRadius;
         var duration = TimeSpan.FromMilliseconds(expanded ? 420 : 280);

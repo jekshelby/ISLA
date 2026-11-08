@@ -6,6 +6,13 @@
 
     <!-- ===== Brushes (frozen = cheaper to render) ===== -->
     <SolidColorBrush x:Key="IslandBackground"    Color="#050505" po:Freeze="True" />
+    <!-- Game HUD: translucent so the scene behind tints the pill; the diagonal shade
+         keeps white text readable on bright game areas. -->
+    <LinearGradientBrush x:Key="GameHudBackground" StartPoint="0,0" EndPoint="1,1" po:Freeze="True">
+        <GradientStop Color="#D8121A2E" Offset="0" />
+        <GradientStop Color="#C60A0B10" Offset="0.55" />
+        <GradientStop Color="#D81E1226" Offset="1" />
+    </LinearGradientBrush>
     <SolidColorBrush x:Key="IslandSurface"       Color="#0B0B0B" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCard"          Color="#0F0F10" po:Freeze="True" />
     <SolidColorBrush x:Key="IslandCardHover"     Color="#161618" po:Freeze="True" />

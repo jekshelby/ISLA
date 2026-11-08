@@ -7,6 +7,11 @@
 - Game HUD: when a full-screen or borderless game takes the foreground, the
   dynamic island turns into a single-line stats bar with a gamepad icon, a `GAME`
   label, and live FPS, CPU, RAM, GPU, and VRAM readings.
+- The pill measures its text and only takes the room it needs (capped at 540 px),
+  then grows or shrinks smoothly as the numbers change.
+- While the HUD is visible the island background becomes a translucent diagonal
+  gradient, so the colours of the game behind tint the pill from moment to moment.
+  Banners and the expanded menu keep the solid background.
 - The HUD samples once per second and stays visible for the whole game session.
   Focused banners and the expanded menu take priority; the HUD returns when they
   finish. Closing the game or switching to another window hides it.
