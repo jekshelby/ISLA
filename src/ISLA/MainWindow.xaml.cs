@@ -61,8 +61,6 @@ public partial class MainWindow : Window
     // Game HUD pill: hugs its text, up to a notification-friendly maximum.
     private const double GameHudMaxWidth = 540;
     private const double GameHudHorizontalPadding = 10;
-    private const string GameHudIconGlyph = "\uE7FC";
-    private const double GameHudIconGap = 8;
     // Game mode attaches to the screen edge like a notch: flat top, rounded bottom and a
     // slimmer body so it covers as little of the game's own top bar as possible.
     private const double GameHudHeight = 22;
@@ -2881,7 +2879,7 @@ public partial class MainWindow : Window
     {
         _collapseTimer.Stop();
         _lastInteractionUtc = DateTime.UtcNow;
-        if (_isIdleNotch)
+        if (_isIdleNotch && !_gameHudVisible)
         {
             // First hover returns to the compact dynamic island. The menu only opens on a
             // later hover of that island, so the notch never jumps straight into the menu.
@@ -2930,7 +2928,7 @@ public partial class MainWindow : Window
     private void IdleTimer_Tick(object? sender, EventArgs e)
     {
         if (_isIdleNotch || _isExpanded || NodeNotificationContent.Visibility == Visibility.Visible ||
-            _gameHudActive || GameStatsContent.Visibility == Visibility.Visible ||
+            _gameHudActive || _gameHudVisible ||
             DateTime.UtcNow - _lastInteractionUtc < TimeSpan.FromSeconds(30))
         {
             return;
@@ -3053,7 +3051,7 @@ public partial class MainWindow : Window
         IslandSurface.BeginAnimation(WidthProperty, animation, HandoffBehavior.SnapshotAndReplace);
     }
 
-    private void ExitIdleNotch(bool animate = true, bool resetTop = true)
+    private void ExitIdleNotch(bool animate = true, bool resetTop = true, bool resetGeometry = true)
     {
         if (!_isIdleNotch)
         {
@@ -3075,14 +3073,19 @@ public partial class MainWindow : Window
         SetIdleNotchFlareVisibility(Visibility.Collapsed);
         if (!animate)
         {
-            IslandSurface.BeginAnimation(WidthProperty, null);
-            IslandSurface.BeginAnimation(HeightProperty, null);
-            BeginAnimation(IslandRadiusProperty, null);
-            IslandSurface.Width = CompactWidth;
-            IslandSurface.Height = CompactHeight;
-            IslandRadius = CompactRadius;
+            if (resetGeometry)
+            {
+                IslandSurface.BeginAnimation(WidthProperty, null);
+                IslandSurface.BeginAnimation(HeightProperty, null);
+                BeginAnimation(IslandRadiusProperty, null);
+                IslandSurface.Width = CompactWidth;
+                IslandSurface.Height = CompactHeight;
+                IslandRadius = CompactRadius;
+            }
+
             if (resetTop)
             {
+                BeginAnimation(TopProperty, null);
                 Top = SystemParameters.WorkArea.Top + NormalTopInset;
             }
 
@@ -3094,12 +3097,17 @@ public partial class MainWindow : Window
             AnimateWindowTop(SystemParameters.WorkArea.Top + NormalTopInset,
                 TimeSpan.FromMilliseconds(280), ExpandEase);
         }
-        IslandSurface.BeginAnimation(WidthProperty,
-            MakeAnimation(CompactWidth, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
-        IslandSurface.BeginAnimation(HeightProperty,
-            MakeAnimation(CompactHeight, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
-        BeginAnimation(IslandRadiusProperty,
-            MakeAnimation(CompactRadius, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+
+        if (resetGeometry)
+        {
+            IslandSurface.BeginAnimation(WidthProperty,
+                MakeAnimation(CompactWidth, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+            IslandSurface.BeginAnimation(HeightProperty,
+                MakeAnimation(CompactHeight, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+            BeginAnimation(IslandRadiusProperty,
+                MakeAnimation(CompactRadius, TimeSpan.FromMilliseconds(280), ExpandEase), HandoffBehavior.SnapshotAndReplace);
+        }
+
         Fade(ClockText, 0, 70, 0, FadeEase, () => Fade(ClockText, 1, 140, 60, FadeEase));
     }
 
@@ -3171,7 +3179,9 @@ public partial class MainWindow : Window
 
         if (_isIdleNotch)
         {
-            ExitIdleNotch();
+            // Keep the window pinned to the edge: the game HUD takes over the geometry
+            // directly, so returning to the compact pill would drop the notch for a frame.
+            ExitIdleNotch(animate: false, resetTop: false, resetGeometry: false);
         }
 
         if (_gameHudVisible)
@@ -3190,19 +3200,18 @@ public partial class MainWindow : Window
 
         if (_gameHudVisible && !_isExpanded && !_nodeNotificationActive)
         {
-            ResizeGameHud(GetGameHudWidth(GameStatsText.Text));
+            ResizeGameHud(GetGameHudWidth());
         }
     }
 
     private void SetGameHudText(GameStatsSnapshot snapshot)
     {
-        var text = snapshot.Describe();
-        if (!string.Equals(GameStatsText.Text, text, StringComparison.Ordinal))
-        {
-            GameStatsText.Text = text;
-        }
-
-        GameStatsText.ToolTip = snapshot.Title;
+        GameFpsText.Text = snapshot.Fps is { } frames ? $"{Math.Round(frames):0}" : "--";
+        GameCpuText.Text = $"{snapshot.CpuPercent:0}%";
+        GameRamText.Text = $"{snapshot.RamUsedGb:0.0}/{snapshot.RamTotalGb:0.0}G";
+        GameGpuText.Text = snapshot.GpuPercent is { } gpu ? $"{Math.Round(gpu):0}%" : "--";
+        GameVramText.Text = snapshot.VramUsedGb is { } vram ? $"{vram:0.0}G" : "--";
+        GameStatsContent.ToolTip = snapshot.Title;
     }
 
     private void ShowGameHud()
@@ -3219,7 +3228,7 @@ public partial class MainWindow : Window
         }
 
         PrepareGameHudContent();
-        var targetWidth = GetGameHudWidth(GameStatsText.Text);
+        var targetWidth = GetGameHudWidth();
         GameStatsContent.Opacity = 0;
         AnimateGameHudWidth(targetWidth, 220);
         GameStatsContent.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160)));
@@ -3231,6 +3240,13 @@ public partial class MainWindow : Window
     /// </summary>
     private void PrepareGameHudContent(bool setGeometry = true)
     {
+        if (_isIdleNotch)
+        {
+            // The idle notch already sits against the screen edge. Drop its compact layout in
+            // place so the HUD can animate straight to the game notch without a bounce.
+            ExitIdleNotch(animate: false, resetTop: false, resetGeometry: false);
+        }
+
         _gameHudVisible = true;
         _gameHudNotch = true;
         // Translucent while gaming: the scene behind tints the pill from moment to moment.
@@ -3252,30 +3268,29 @@ public partial class MainWindow : Window
             var duration = TimeSpan.FromMilliseconds(220);
             IslandSurface.BeginAnimation(HeightProperty, MakeAnimation(GameHudHeight, duration, CollapseEase));
             BeginAnimation(IslandRadiusProperty, MakeAnimation(GameHudRadius, duration, CollapseEase));
-            if (Math.Abs(Top - SystemParameters.WorkArea.Top) > 0.5)
-            {
-                AnimateWindowTop(SystemParameters.WorkArea.Top, duration, CollapseEase);
-            }
+            // Always re-target the top: an interrupted idle transition can still be animating
+            // away from the edge even when Top already reads 0 at this instant.
+            AnimateWindowTop(SystemParameters.WorkArea.Top, duration, CollapseEase);
         }
 
-        CompactContent.Width = GetGameHudWidth(GameStatsText.Text) - (GameHudHorizontalPadding * 2);
+        CompactContent.Width = GetGameHudWidth() - (GameHudHorizontalPadding * 2);
         IslandSurface.Padding = new Thickness(GameHudHorizontalPadding, 0, GameHudHorizontalPadding, 0);
         CompactContent.Visibility = Visibility.Visible;
         GameStatsContent.Visibility = Visibility.Visible;
         StartGameHudGlass();
     }
 
-    /// <summary>Measures the game row so the pill only takes the room its text needs.</summary>
-    private double GetGameHudWidth(string text)
+    /// <summary>Measures the game row so the pill only takes the room its chips need.</summary>
+    private double GetGameHudWidth()
     {
-        var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        var content = MeasureNotificationText(GameHudIconGlyph, GameHudIconText, pixelsPerDip) +
-                      GameHudIconGap +
-                      MeasureNotificationText(text, GameStatsText, pixelsPerDip);
+        // TextBlock formats its text on the next layout pass, so measure the row immediately
+        // after the values were written instead of using the previous second's numbers.
+        GameStatsRow.UpdateLayout();
+        GameStatsRow.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
 
         // A few pixels of slack keep tabular figures and rounding from trimming the last digit.
         return Math.Clamp(
-            Math.Ceiling(content) + 6 + (GameHudHorizontalPadding * 2),
+            Math.Ceiling(GameStatsRow.DesiredSize.Width) + 6 + (GameHudHorizontalPadding * 2),
             NotificationMinWidth,
             GameHudMaxWidth);
     }
@@ -3762,7 +3777,7 @@ public partial class MainWindow : Window
                 GameStatsContent.Opacity = 1;
             }
 
-            gameHudWidth = GetGameHudWidth(GameStatsText.Text);
+            gameHudWidth = GetGameHudWidth();
         }
 
         var targetWidth = expanded ? ExpandedWidth : (restoreGameHud ? gameHudWidth : CompactWidth);

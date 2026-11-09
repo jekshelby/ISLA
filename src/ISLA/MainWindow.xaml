@@ -202,30 +202,53 @@
                         </StackPanel>
                     </Grid>
                     <!-- Single row while a full-screen game is in the foreground:
-                         gamepad | live FPS / CPU / RAM / GPU / VRAM. -->
+                         gamepad + one chip per metric, so the values never blur together. -->
                     <Grid x:Name="GameStatsContent"
                           Visibility="Collapsed"
                           HorizontalAlignment="Center"
-                          VerticalAlignment="Center">
-                        <StackPanel Orientation="Horizontal"
+                          VerticalAlignment="Center"
+                          ToolTipService.ShowDuration="10000">
+                        <StackPanel x:Name="GameStatsRow"
+                                    Orientation="Horizontal"
                                     HorizontalAlignment="Center"
                                     VerticalAlignment="Center">
                             <TextBlock x:Name="GameHudIconText"
                                        Text="&#xE7FC;"
                                        FontFamily="Segoe MDL2 Assets"
-                                       FontSize="13"
+                                       FontSize="12"
                                        Foreground="{StaticResource IslandAccent}"
-                                       VerticalAlignment="Center" />
-                            <TextBlock x:Name="GameStatsText"
-                                       Style="{StaticResource ContentSubtitleStyle}"
-                                       Foreground="{StaticResource IslandText}"
-                                       FontSize="11.5"
-                                       FontWeight="SemiBold"
-                                       Typography.NumeralAlignment="Tabular"
                                        VerticalAlignment="Center"
-                                       Margin="8,0,0,0"
-                                       TextTrimming="CharacterEllipsis"
-                                       Text="FPS -- · CPU --% · RAM --" />
+                                       Margin="0,0,7,0" />
+                            <Border Style="{StaticResource GameStatChipStyle}">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="FPS" Style="{StaticResource GameStatLabelStyle}" />
+                                    <TextBlock x:Name="GameFpsText" Text="--" Style="{StaticResource GameStatValueStyle}" />
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource GameStatChipStyle}">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="CPU" Style="{StaticResource GameStatLabelStyle}" />
+                                    <TextBlock x:Name="GameCpuText" Text="--" Style="{StaticResource GameStatValueStyle}" />
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource GameStatChipStyle}">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="RAM" Style="{StaticResource GameStatLabelStyle}" />
+                                    <TextBlock x:Name="GameRamText" Text="--" Style="{StaticResource GameStatValueStyle}" />
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource GameStatChipStyle}">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="GPU" Style="{StaticResource GameStatLabelStyle}" />
+                                    <TextBlock x:Name="GameGpuText" Text="--" Style="{StaticResource GameStatValueStyle}" />
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource GameStatChipStyle}" Margin="0">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="VRAM" Style="{StaticResource GameStatLabelStyle}" />
+                                    <TextBlock x:Name="GameVramText" Text="--" Style="{StaticResource GameStatValueStyle}" />
+                                </StackPanel>
+                            </Border>
                         </StackPanel>
                     </Grid>
                 </Grid>

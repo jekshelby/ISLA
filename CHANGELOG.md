@@ -6,9 +6,10 @@
 
 - Game HUD: when a full-screen or borderless game takes the foreground, the
   dynamic island turns into a single-line stats bar with a gamepad icon and live
-  FPS, CPU, RAM, GPU, and VRAM readings.
-- The pill measures its text and only takes the room it needs (capped at 540 px),
-  then grows or shrinks smoothly as the numbers change.
+  FPS, CPU, RAM, GPU, and VRAM readings. Each reading sits in its own small chip
+  (label + value), so the numbers never blend into one wall of text.
+- The pill measures its chips and only takes the room it needs (capped at
+  540 px), then grows or shrinks smoothly as the numbers change.
 - In game mode the pill attaches to the top edge of the screen as a notch: flat
   top corners, rounded bottom, and a slim 22 px body, so it leaves the game's own
   menu and top bar visible.
@@ -31,6 +32,12 @@
 
 ### Fixed
 
+- The game notch now stays glued to the top edge when the HUD takes over from
+  the idle notch. Previously the idle transition could keep sliding the window
+  back down by the compact inset after the HUD had appeared, which made the
+  notch look like a floating pill.
+- Hovering the pill during a game no longer re-runs the idle transition, so the
+  notch cannot detach from the screen edge under the pointer.
 - The HUD no longer sticks around after switching to another app: a window only
   counts as a game while it covers its whole monitor, and the last game is only
   reused while ISLA itself has focus (opening the menu).

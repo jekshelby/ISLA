@@ -16,16 +16,7 @@ public sealed record GameStatsSnapshot(
     double RamTotalGb,
     double RamPercent,
     double? GpuPercent,
-    double? VramUsedGb)
-{
-    public string Describe()
-    {
-        var fps = Fps is { } frames ? $"{Math.Round(frames):0} FPS" : "FPS --";
-        var gpu = GpuPercent is { } usage ? $"GPU {Math.Round(usage):0}%" : "GPU --";
-        var vram = VramUsedGb is { } memory ? $"VRAM {memory:0.0}G" : "VRAM --";
-        return $"{fps} · CPU {CpuPercent:0}% · RAM {RamUsedGb:0.0}G/{RamTotalGb:0.0}G · {gpu} · {vram}";
-    }
-}
+    double? VramUsedGb);
 
 /// <summary>
 /// Detects a full-screen game in the foreground, samples CPU / RAM / GPU / VRAM, and reads

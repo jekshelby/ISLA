@@ -34,10 +34,11 @@ reminders, a game performance HUD, and Windows notification controls.
   banner that stays visible until it is acknowledged in the Calendar tab. The
   banner returns after the menu is closed if it was not acknowledged.
 - Game HUD: when a full-screen or borderless game is in the foreground, the island
-  becomes a live stats bar showing FPS, CPU, RAM, GPU, and VRAM. The pill hugs
-  its text (up to 540 px) and resizes smoothly as the readings change, over a
-  frosted-glass background that blurs and tints the scene behind it. It sits
-  against the top edge as a slim notch with square top corners and a rounded
+  becomes a live stats bar showing FPS, CPU, RAM, GPU, and VRAM, each in its own
+  labelled chip so the readings stay visually separate. The pill measures those
+  chips (up to 540 px) and resizes smoothly as the readings change, over a
+  frosted-glass background that blurs and tints the scene behind it. It stays
+  glued against the top edge as a slim notch with square top corners and a rounded
   bottom, so the game's own menu stays visible. It updates every second, stays
   visible for the whole session, disappears when the game is
   closed or another window takes focus, and returns after banners or the open

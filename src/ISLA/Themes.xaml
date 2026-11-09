@@ -60,6 +60,36 @@
         <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
     </Style>
 
+    <!-- Game HUD: one chip per metric so FPS / CPU / RAM / GPU / VRAM stay separate. -->
+    <Style x:Key="GameStatChipStyle" TargetType="Border">
+        <Setter Property="Background" Value="#21FFFFFF" />
+        <Setter Property="BorderBrush" Value="#1CFFFFFF" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Height" Value="16" />
+        <Setter Property="Padding" Value="6,0" />
+        <Setter Property="Margin" Value="0,0,4,0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="GameStatLabelStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource IslandMutedText}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="8" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+
+    <Style x:Key="GameStatValueStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource IslandText}" />
+        <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+        <Setter Property="FontSize" Value="10.5" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Margin" Value="3,0,0,0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+    </Style>
+
     <!-- Battery percentage shown at the right edge of the compact island -->
     <Style x:Key="CompactPercentStyle" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{StaticResource IslandTextSecondary}" />
